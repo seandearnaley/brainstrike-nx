@@ -1,0 +1,47 @@
+---
+description: Electron Renderer Process Guidelines
+globs: 
+---
+# Electron Renderer Process Guidelines
+
+This document focuses on best practices for the Electron renderer, particularly when using frameworks like React or Next.js.
+
+## 1. Node Integration & Context Isolation
+- **Node Integration Disabled:**
+  - Assume no direct Node APIs in the renderer. Instead, use the secure APIs from `window.electron` or similar.
+  - If Node APIs are needed, rely on your preload script’s whitelisted methods.
+- **Context Isolation:**
+  - Keep user code in the isolated renderer context.
+  - Communicate with the main process through exposed functions or IPC channels.
+
+## 2. React & Next.js Integration
+- **Browser-Like Environment:**
+  - Treat the renderer as if it were a browser—use client-side methods for DOM manipulation.
+  - For a Next.js-based UI, load the app normally, verifying that asset paths and routing are configured for Electron if needed.
+- **Handling Navigation:**
+  - Use standard React/Next Router APIs for in-app navigation.
+  - For external links, consider using `shell.openExternal` via a preload script to avoid loading untrusted pages in the renderer.
+
+## 3. State Management & Persistence
+- **Local vs. Global State:**
+  - Keep local UI state in React or Zustand as normal.
+  - For data that must persist or be shared across windows, rely on main-process storage (e.g., `electron-store` via IPC).
+- **IPC Access:**
+  - Each action or request that requires OS-level tasks (like file operations) must go through a secure preload-based API (e.g., `window.electron.fs.readDir()`).
+
+## 4. Performance & Virtualization
+- **Efficient Rendering:**
+  - Use virtualization libraries (react-window or react-virtualized) for large lists.
+  - Avoid re-rendering the entire tree on small state changes; memoize components carefully.
+- **Lazy Loading:**
+  - Dynamically import heavyweight modules only when needed.
+  - For large data sets, fetch them on demand and display partial results to keep the UI responsive.
+
+## 5. Security & XSS Prevention
+- **No Direct `eval` or `dangerouslySetInnerHTML`:**
+  - Avoid direct HTML injection. If absolutely necessary, sanitize inputs thoroughly.
+- **Content Security Policy (CSP):**
+  - Ensure any custom scripts or external resources are whitelisted in CSP.
+  - Block inlined scripts where possible to reduce XSS vectors.
+
+Adhering to these recommendations ensures your renderer remains performant, secure, and consistent with modern Electron development practices.

@@ -1,0 +1,49 @@
+---
+description: Electron State Management & Persistence Guidelines
+globs: 
+---
+# Electron State Management & Persistence
+
+Guidelines for syncing application data and user settings across the main and renderer processes, using stores like electron-store or hybrid libraries.
+
+## 1. Single Source of Truth
+- **Main Process Ownership:**
+  - Centralize persistent data in the main process using electron-store or a similar database.
+  - Expose set/get methods to the renderer via IPC or preload to maintain one authoritative data source.
+- **Renderer State:**
+  - Use React/Next or Zustand for local UI state.
+  - For data that must persist or be shared across multiple windows, always delegate writes to the main process.
+
+## 2. Synchronization Patterns
+- **onDidChange Events:**
+  - If using electron-store, leverage `onDidChange` to broadcast updates to all windows.
+  - Subscribing renderers can update their local state or re-fetch as needed.
+- **Pub/Sub IPC:**
+  - Implement custom publish/subscribe for data changes. The main process notifies renderer processes via `webContents.send()`.
+  - Use a channel-based approach (e.g., `store:updated`) carrying keys and values.
+
+## 3. Handling Large or Complex Data
+- **Use a Database When Appropriate:**
+  - electron-store suits small to medium config or preference data.
+  - For large datasets, consider SQLite or a local DB. Synchronize changes with the renderer only as needed.
+- **Throttle/Batch Writes:**
+  - If the UI updates frequently (e.g., typing), buffer changes before writing to disk.
+  - This avoids frequent file I/O, improving performance.
+
+## 4. Zustand or Other State Libraries
+- **Custom Storage Adapter:**
+  - If using Zustand’s `persist` middleware, create a custom storage adapter that calls main-process APIs (e.g., `getItem(key)`, `setItem(key, value)`).
+  - Ensure it handles async operations gracefully.
+- **Conflict Resolution:**
+  - If multiple windows or the main process can change the same data, define a merge strategy or last-write-wins approach.
+  - Minimize collisions by funneling all writes through one process.
+
+## 5. Testing & Debugging
+- **Mock the Store:**
+  - In unit tests, mock electron-store or the main process calls to isolate UI logic.
+  - Verify that your pub/sub or `onDidChange` subscriptions handle events correctly.
+- **Versioning & Migration:**
+  - For electron-store or database, plan for data migrations when schemas change.
+  - Provide fallback or default values if keys are missing.
+
+Adhering to these strategies ensures robust, consistent, and scalable state management within Electron, preventing data conflicts and performance bottlenecks.

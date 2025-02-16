@@ -1,0 +1,51 @@
+---
+description: Electron Main Process Guidelines
+globs: 
+---
+# Electron Main Process Guidelines
+
+These guidelines detail best practices for Electron’s main process, focusing on security, IPC structure, and performance considerations.
+
+## 1. App Lifecycle & Window Management
+- **Single Responsibility:**
+  - Keep `main.ts` (or `main.js`) minimal, handling only app lifecycle and window creation.
+  - Move complex logic into separate modules or background workers to avoid clutter.
+- **BrowserWindow Options:**
+  - Disable `nodeIntegration` in the renderer by default.
+  - Enable `contextIsolation` and `sandbox` for improved security.
+  - Provide a secure `preload` script to expose only necessary APIs.
+
+## 2. IPC & Preload Scripts
+- **Context Isolation:**
+  - Always enable context isolation to keep the renderer separate from Node.
+  - Use `contextBridge.exposeInMainWorld` to share a controlled API with the renderer.
+- **IPC Handlers:**
+  - Use unique channels for each type of action, e.g. `fs:read-dir`, `dialog:open`.
+  - Validate data from the renderer (file paths, etc.) before performing sensitive actions.
+
+## 3. File System & OS Integration
+- **Asynchronous Operations:**
+  - Use `fs.promises` or async methods to avoid blocking the event loop.
+  - Offload heavy tasks (e.g., scanning large directories) to worker threads or separate processes.
+- **Native Modules & Tools:**
+  - For OS-level dialogs, use `dialog.showOpenDialog()` from main.
+  - Manage notifications, system tray, or auto-update from the main process.
+
+## 4. Performance & Resource Management
+- **Avoid Synchronous Calls:**
+  - Synchronous file I/O or IPC blocks the main thread, causing UI hangs.
+  - If CPU-intensive tasks are required, spawn a worker or child process.
+- **Lazy Loading:**
+  - Dynamically import expensive modules or data only when needed.
+  - Keep main process code small to speed up startup.
+
+## 5. Security Best Practices
+- **Disable Remote Module:**
+  - Avoid using `@electron/remote`. Instead, rely on IPC.
+- **Validate IPC Messages:**
+  - Verify sender, sanitize inputs, and guard critical OS actions.
+- **CSP & Safe Defaults:**
+  - Use a safe Content Security Policy for any loaded HTML.
+  - Block navigation to external sites or use `shell.openExternal` carefully.
+
+Following these main process guidelines keeps the core of your Electron app secure, responsive, and cleanly structured.

@@ -1,0 +1,969 @@
+Thanks for the details! I’ll conduct deep research into migrating your Next.js App Router-based application into an Nx monorepo with an Electron desktop application, focusing on:
+
+- Implementing a **hybrid state management** approach where components can be bound to different stores (Zustand + Electron-compatible storage like `electron-store`), including trade-offs and best practices.
+- Ensuring **efficient file system operations** with direct OS-level access and how to best structure interprocess communication (IPC) between Electron’s main and renderer processes.
+- Strategies for implementing **offline mode and auto-updates** in Electron, including how to properly cache data and update the application reliably.
+- Considerations for **macOS-first** development, with later expansion to Windows and Linux, addressing platform-specific constraints and best practices.
+- **Performance strategies** for managing typical web app repository directory structures, including any potential performance pitfalls when transitioning to Electron.
+
+I’ll prepare a comprehensive report with structured implementation guidance, best practices, and recommended tools for the migration. I’ll notify you once the research is complete!
+
+# Nx Monorepo Setup
+
+Migrating to an Nx monorepo involves reorganizing your project into **multiple apps and shared libraries**. Nx is a tool for structuring code at scale, and it encourages splitting code into self-contained libraries that can be composed by applications ([Nx Architecture Part-1: Organizing and Structuring a React Project with Nx](https://www.qovery.com/blog/nx-architecture-part-1-organizing-and-structuring-a-react-project-with-nx/#:~:text=The%2080%2F20%20rule%3A%20Note%20that,apps%2C%20following%20an%2080%2F20%20approach)). In this case, you'll create one Nx workspace containing two applications: a Next.js web app and an Electron desktop app. Both will live under an `apps/` directory, and common code will reside in `libs/`. This structure promotes reusability and maintainability.
+
+## Monorepo Structure and Best Practices
+
+**Folder Layout:** By convention, Nx keeps applications in `apps/` and libraries in `libs/`. Each app is a separate deployable product (e.g. `apps/web` for Next.js, `apps/desktop` for Electron), while libraries are units of code shared between apps. You might organize libraries by domain or feature scope. For example, code specific to only the desktop app could go in `libs/desktop/…`, and code shared by both could go in `libs/shared/…`. In practice, many monorepos follow an 80/20 rule: *about 80% of code lives in `libs/`, and only ~20% in `apps/`* ([Nx Architecture Part-1: Organizing and Structuring a React Project with Nx](https://www.qovery.com/blog/nx-architecture-part-1-organizing-and-structuring-a-react-project-with-nx/#:~:text=%2A%20About%2080,placed%20in%20the%20%2Fapps%20folder)). The applications act mostly as *containers* that wire together library functionality ([Nx Architecture Part-1: Organizing and Structuring a React Project with Nx](https://www.qovery.com/blog/nx-architecture-part-1-organizing-and-structuring-a-react-project-with-nx/#:~:text=The%2080%2F20%20rule%3A%20Note%20that,apps%2C%20following%20an%2080%2F20%20approach)). This means most of your business logic, UI components, state management, and utilities will be implemented in libraries, which the Next.js and Electron apps import.
+
+**Shared Libraries:** You already identified some logical shared libs:
+- **`libs/core`:** could hold core business logic, types, and services that are environment-agnostic (usable in both web and desktop). For example, data models, validation functions, and any universal utilities.
+- **`libs/utils`:** a place for generic helper functions, formatting, logging utilities, etc., that can be reused anywhere.
+- **`libs/state`:** centralized state management logic. This might include your Zustand store definitions and any state-related utilities (context providers, hooks to use the store, etc.). By putting state logic in a library, both the Next.js app and the Electron app can use the same state management code.
+- You might also create **UI component libraries** (e.g. `libs/ui`) if you plan to share React components between apps (for instance, if later you had another app). In this migration, since the desktop app’s UI is essentially the Next.js app reused, you may not need a separate UI lib initially. The Next.js app itself can own the components, or you can gradually move generic ones into a lib if needed.
+
+Organize libraries either by **feature domain** or by **layer/type**. Nx allows flexible grouping using subfolders and tags. For example, you could group by scope: `libs/shared/*` for truly shared code, and possibly `libs/desktop/*` for libraries only the Electron app uses, etc. Another approach is grouping by type: e.g. `libs/util-*` for utilities, `libs/state-*` for state management, etc., combined with tags to enforce boundaries ([Nx Architecture Part-1: Organizing and Structuring a React Project with Nx](https://www.qovery.com/blog/nx-architecture-part-1-organizing-and-structuring-a-react-project-with-nx/#:~:text=In%20an%20NX%20workspace%2C%20projects,around%20folders%20and%20NX%20tags)) ([Nx Architecture Part-1: Organizing and Structuring a React Project with Nx](https://www.qovery.com/blog/nx-architecture-part-1-organizing-and-structuring-a-react-project-with-nx/#:~:text=%2A%20Type%20which%20defines%20,scope%3Afoo)). The key is to establish a consistent convention so it's clear what goes where. 
+
+**Enforce Boundaries:** Nx has tooling to enforce module boundaries via ESLint rules, using tags on libraries ([Nx Architecture Part-1: Organizing and Structuring a React Project with Nx](https://www.qovery.com/blog/nx-architecture-part-1-organizing-and-structuring-a-react-project-with-nx/#:~:text=Nx%20allows%20you%20to%20enforce,2)). For example, you might tag `libs/core` and `libs/utils` as `scope:shared` (accessible to any app), and tag something like `libs/desktop/electron-utils` as `scope:electron` (only Electron app can use it). This prevents unintended cross-imports. While setting up tags is optional for a solo project, it can prevent accidentally using web-only code in the Electron app or vice versa. For instance, you might tag web-specific libs with `context:web` and desktop with `context:electron` to catch mistakes at build time.
+
+**Workspace Configuration:** Nx will generate a root `nx.json` and a `tsconfig.base.json`. Ensure `nx.json` has the proper `workspaceLayout` (it usually defaults to `"appsDir": "apps", "libsDir": "libs"`). Also, Nx will add path aliases in `tsconfig.base.json` for each library you generate. For example, if you generate `libs/core`, it might add an alias like `@myorg/core` pointing to that library’s source. This lets you import from `@myorg/core` in your code (you can choose your own prefix). Organize your libraries such that these imports make sense (for example, `import { something } from '@yourorg/state';`). Consistent naming helps keep imports readable.
+
+When configuring the monorepo, also add the Nx plugins you'll need. Specifically, you'll use **@nx/next** for Next.js support and likely a community plugin for Electron (more on that in the Electron section). Nx will list used plugins in `nx.json` under the `plugins` array. For instance, after adding the Next.js app, you’ll see `@nx/next` configured, which gives Nx the ability to run `nx serve`, `nx build` etc. for Next apps ([@nx/next | Nx](https://nx.dev/nx-api/next#:~:text=%40nx%2Fnext%20Configuration)). Make sure your Next.js app’s config (`next.config.js`) is compatible with Nx; typically, wrapping it with the Nx provided `withNx` is recommended for performance and module resolution improvements. Nx’s `withNx()` plugin can enable SWC and other Nx optimizations for Next ([Running Nextron(Next js library) inside NX monorepo · Issue #16064 · nrwl/nx · GitHub](https://github.com/nrwl/nx/issues/16064#:~:text=%2F%2F%20next.config.js%20const%20,nx)), but be aware of any Electron-specific quirks (more on this when integrating Electron).
+
+## Migrating the Next.js Codebase into Nx
+
+**1. Create the Nx Workspace:** Start by creating a new Nx workspace (if you haven't already). You can use the Nx CLI:
+```bash
+npx create-nx-workspace@latest my-workspace
+```
+Choose the **integrated monorepo** style when prompted (since you want one repository for multiple apps) ([GitHub - bennymeg/nx-electron: Electron schematics for nrwl nx platform](https://github.com/bennymeg/nx-electron#:~:text=npx%20create)). You can start with an empty workspace or one seeded with a dummy app. If Nx offers to generate a Next.js app during setup, you can let it create an initial Next app (e.g., called "web") to get the configuration files in place.
+
+**2. Add a Next.js app project:** If you didn’t generate it in the previous step, you can add one now using the Nx generator:
+```bash
+nx g @nx/next:app web
+```
+This will create `apps/web` with a fresh Next.js 15 setup (App Router support, etc.), including a `project.json` for build targets, and a basic `next.config.js`. It will also install `@nx/next` plugin if not already installed. At this point, run `nx serve web` to verify the generated app works.
+
+**3. Move your Next.js code into `apps/web`:** Copy your existing Next.js 15 project files into the Nx structure. Key steps:
+   - Move all your Next pages and `app/` directory content into `apps/web` (maintain the same structure inside, e.g. `apps/web/pages`, `apps/web/app` if using the App Router, etc.). Also move static assets (e.g. anything in `public/` or `styles/`).
+   - Migrate config files: Next.js config (`next.config.js`), TypeScript config, ESLint, etc. Nx’s generator likely created some of these in `apps/web`. Compare and merge your settings. For example, if your original project had custom ESLint rules, bring those into `apps/web/.eslintrc.json`. If you have a custom Babel or SWC config, ensure it’s reflected.
+   - Check `tsconfig.json` references: Nx uses a root `tsconfig.base.json` and each project has its own `tsconfig.*.json`. The Next app might have `tsconfig.app.json` or similar referenced by `project.json`. Ensure that file extends the base config and includes paths to your libs. If you renamed the root tsconfig, Nx might have generated a new base one ([Convert from a Standalone Repository to a Monorepo | Nx](https://nx.dev/recipes/tips-n-tricks/standalone-to-monorepo#:~:text=2,tsconfig.old.json)).
+   - Move dependency declarations: In Nx, typically there is a single **root** `package.json` for all dependencies (monorepo style). After moving your code, consolidate your npm packages into the root `package.json`. If `nx import` was used, Nx may have merged or suggested merging these ([Import an Existing Project into an Nx Workspace | Nx](https://nx.dev/recipes/adopting-nx/import-project#:~:text=The%20)) ([Import an Existing Project into an Nx Workspace | Nx](https://nx.dev/recipes/adopting-nx/import-project#:~:text=Manage%20Dependencies)). If doing manually, just copy over any missing dependencies/devDependencies from your old project’s package.json into the root one. Remove any duplicate or conflicting versions. Nx will install them for the whole workspace.
+   - Remove old files: Once everything is copied into `apps/web`, you can delete the original standalone structure (if it was outside the monorepo). If you used Nx’s `convert-to-monorepo` generator, it might have done these moves for you (creating a temp app, etc.) ([Convert from a Standalone Repository to a Monorepo | Nx](https://nx.dev/recipes/tips-n-tricks/standalone-to-monorepo#:~:text=For%20this%20recipe%2C%20we%27ll%20assume,the%20app%20involves%20four%20stages)) ([Convert from a Standalone Repository to a Monorepo | Nx](https://nx.dev/recipes/tips-n-tricks/standalone-to-monorepo#:~:text=nx%20g%20app%20apps%2Ftemp)). Double-check nothing is left behind.
+
+**4. Adjust import paths:** If your Next.js code used relative imports between what will become libraries, now is a good time to refactor to use Nx library imports. For example, suppose you decide to put some state management in `libs/state`. Initially, that code might still be in `apps/web` (we will extract it soon). But if you've already created the `libs/state` library, update your code to import from `@yourorg/state` instead of relative paths. This can be done gradually. Nx’s **workspace lint** can help catch any imports that cross boundaries improperly (it will flag imports from one app to another app, since apps shouldn’t import each other, only libs). A successful migration means your Next app should compile and run via Nx. Run `nx serve web` – if any import errors occur, fix the paths or library setup accordingly.
+
+**5. Generate and populate libraries:** Now, create the shared libs for `core`, `utils`, `state`:
+```bash
+nx g @nx/js:lib core --directory=shared
+nx g @nx/js:lib utils --directory=shared
+nx g @nx/react:lib state --directory=shared
+```
+*(Here we put them under a `shared/` grouping folder for clarity, but you can adjust)*. The generators will scaffold each library in `libs/shared/core`, etc., with its own `index.ts`. Move relevant code from `apps/web` into these libs:
+   - **libs/shared/core:** e.g. move any non-UI, business logic classes or functions that both environments will use.
+   - **libs/shared/utils:** move general utilities.
+   - **libs/shared/state:** move your Zustand store initialization and related hooks. For example, if your Next app had a store file (like `useStore.js` or similar), transfer it here. You might need to adjust imports (for instance, if it relied on local storage, we’ll adapt that for Electron later).
+   - After moving, adjust the Next app to import from these libs. For example, if in Next you did `import createStore from '../../store/useStore'`, it might become `import { useStore } from '@yourorg/state';` after exposing it in the lib’s `index.ts`.
+   - Run `nx test` or `nx build` on these libs (Nx generates default tests). Ensure everything still compiles.
+
+Don’t worry if everything isn’t perfectly separated yet – the goal is to get the monorepo structure in place. You can continuously refactor to better partition code. Nx provides a `nx graph` command to visualize dependencies between projects, which can guide you in breaking circular dependencies and seeing what depends on what.
+
+**6. Verify the Next.js app still works:** Finally, run the Next app in dev mode via Nx: `nx serve web`. It should function exactly as before the migration, just running from its new location. Also try a production build: `nx build web` (which calls `next build`). If the build passes, deploy or run `nx serve web --prod` (which typically does `next start`). In an Nx setup, these tasks are just proxies to Next’s commands, so behavior should match your single-app setup.
+
+**Handling Dependencies and Workspace Config:** If the Next app had unique build scripts or needed environment variables, integrate those into Nx:
+   - Nx `project.json`: Check `apps/web/project.json`. It defines targets like `build`, `serve`, `lint`, etc. Nx’s @nx/next plugin will have set these to use the Next.js CLI under the hood. For example, `"build": { "executor": "@nx/next:build", ... }`. Usually you won’t need to alter these unless you have custom build steps.
+   - Environment files: If you used a `.env` file, keep it at `apps/web/.env` (Next will still find it). Nx also supports global `.env` if needed.
+   - ESLint/Prettier: Nx likely placed base configs at the root. You can extend them or adjust per project. Ensure the rules are consistent with your original project (for example, module boundary rules may be new – you might see warnings if you import something incorrectly across libs).
+   - **Dependency versions:** Since you consolidated package.json, now all apps share dependency versions. If your Next app was Node 18 and Electron might bundle Node 20, align versions accordingly. Also, include any Electron-related packages (like `electron`, `electron-builder`, etc.) in root package.json as you add the desktop app.
+
+Nx’s **caching** and **parallel builds** will come in handy. For example, `nx run-many --target=build --all` can build both apps, and Nx will cache results. This speeds up iteration once both apps are in place.
+
+In summary, at the end of this Nx setup phase you should have:
+- `apps/web` with the Next.js App Router code,
+- placeholder `apps/desktop` for Electron (to be set up next),
+- `libs/shared/core`, `libs/shared/utils`, `libs/shared/state` with code moved out of `web`,
+- A single package.json and consistent config. All tests passing and `nx serve web` working.
+
+# Electron Integration
+
+With the monorepo ready, the next step is integrating an Electron application that uses your Next.js app as its UI. The goal is a **minimal, secure Electron setup** that opens your Next.js interface in a desktop window. We will cover creating the Electron app in Nx, wiring it to serve the Next.js content, using preload scripts for safe communication, and enforcing Electron security best practices.
+
+## Setting Up the Electron App in Nx
+
+**Generating the Electron app:** Nx doesn't have an official Electron generator built-in, but there's a community plugin **nx-electron** that simplifies this process ([nx-electron/README.md at master · bennymeg/nx-electron · GitHub](https://github.com/bennymeg/nx-electron/blob/master/README.md#:~:text=Creating%20Nx%20Electron%20Application)) ([nx-electron/README.md at master · bennymeg/nx-electron · GitHub](https://github.com/bennymeg/nx-electron/blob/master/README.md#:~:text=%2A%20Run%20%60nx%20build%20%3Celectron,to%20build%20your%20application)). You can add it if desired:
+```bash
+npm install -D nx-electron
+nx g nx-electron:app desktop --frontendProject=web
+```
+This would scaffold `apps/desktop` with a basic Electron setup, linking it to the `web` project as its frontend ([nx-electron/README.md at master · bennymeg/nx-electron · GitHub](https://github.com/bennymeg/nx-electron/blob/master/README.md#:~:text=nx%20g%20nx,name)). It creates a structure where `apps/desktop/src` contains an Electron **main process** file (e.g. `main.ts`), possibly a preload script, and some configuration for packaging. It also provides custom Nx targets like `nx serve desktop` (to run Electron in dev) and `nx build desktop` (to bundle for distribution) ([nx-electron/README.md at master · bennymeg/nx-electron · GitHub](https://github.com/bennymeg/nx-electron/blob/master/README.md#:~:text=Serving%20Nx%20Electron%20Application)). Under the hood, it uses webpack to bundle the Electron main process and can package the app using electron-builder.
+
+Alternatively, you can set up Electron manually:
+- Create `apps/desktop` and put an Electron `main.js` (or TypeScript `main.ts`) in it.
+- Add a script or Nx target to launch Electron. For example, add to `workspace.json`/`project.json` for desktop:
+  ```json
+  "serve": {
+    "executor": "nx:run-commands",
+    "options": {
+      "command": "electron apps/desktop/main.js"
+    }
+  }
+  ```
+  (In development, you might run Next.js dev server and then start Electron pointing to it.)
+- For production build, you'll need to package the Next app and Electron together. Using electron-builder or Electron Forge via scripts is possible. However, using **nx-electron** can save time because it includes builders for packaging and even auto-update event templates ([GitHub - bennymeg/nx-electron: Electron schematics for nrwl nx platform](https://github.com/bennymeg/nx-electron#:~:text=obfuscates%20you%20code%20,backend%20webpack%20bundles%20into%20single)) ([GitHub - bennymeg/nx-electron: Electron schematics for nrwl nx platform](https://github.com/bennymeg/nx-electron#:~:text=,webpack%20bundles%20into%20single%20executable)).
+
+Given the complexity, leveraging `nx-electron` is recommended for a solo developer. It sets up Webpack to bundle your main process code (with tree-shaking, etc.), and it configures packaging (using electron-builder) by default ([GitHub - bennymeg/nx-electron: Electron schematics for nrwl nx platform](https://github.com/bennymeg/nx-electron#:~:text=,webpack%20bundles%20into%20single%20executable)) ([nx-electron/README.md at master · bennymeg/nx-electron · GitHub](https://github.com/bennymeg/nx-electron/blob/master/README.md#:~:text=Packaging%20Nx%20Electron%20Application)). The plugin will produce a `apps/desktop/src/app` directory with files like `main.ts`, maybe `preload.ts`, and an `electron-builder.json` or similar config for making installers. It also suggests setting Next’s `baseHref` to `"./"` and using hash routing in certain frameworks ([nx-electron/README.md at master · bennymeg/nx-electron · GitHub](https://github.com/bennymeg/nx-electron/blob/master/README.md#:~:text=command)), but for Next.js that might not apply (Next handles routing differently, see below).
+
+After generation, open `apps/desktop/src/main.ts` (or `.js`):
+- It should create a BrowserWindow to load your front-end.
+- Modify it to load your Next.js application. In dev, you'll load the Next dev server URL (e.g. http://localhost:4200 or 3000), and in production you'll load an `index.html` or local URL after building the Next app.
+
+**Dev vs Production configuration:** For development, a common approach is to run Next.js in dev mode and point Electron to it:
+   - Start the Next app: `nx serve web` (defaults to port 4200 with Nx; Next itself default is 3000, but Nx might configure 4200).
+   - In Electron's main file, do `mainWindow.loadURL('http://localhost:4200')` once Next is running. You might start Electron with a slight delay or wait for a ready signal.
+   - Nx can help by running both together. You could create an Nx target that runs `nx serve web` and the Electron serve concurrently (via `run-commands` or a custom executor).
+   
+In production, you have two main options to load the Next app:
+1. **Run a local Next.js server in Electron:** You can bundle your Next app for production (with `nx build web`, which yields a `.next` directory) and then start it as a Node server inside Electron. This approach essentially means Electron’s main process will execute `next start` or use Next’s custom server API to handle requests. It's powerful (supports SSR, dynamic routes, etc.), but as noted in a guide, it *makes your app heavier by running a Node.js server on the user's machine*, and also allows the user to possibly access the app via a browser on `localhost` ([Learn how to build a desktop application with Electron and Next.js while also adding API route capabilities. | by Faizk | Stackademic](https://blog.stackademic.com/learn-how-to-build-a-desktop-application-with-electron-and-nextjs-while-also-adding-api-route-ebaf37b0511b#:~:text=,etc%20%E2%80%94%20and%20access%20localhost%3A3000)). While running a local server is feasible, it might be overkill if you don’t need SSR or have mostly static content. Security-wise it's not terrible (since it's local only), but you should be aware the user could open their browser to the app's localhost port outside of Electron's shell.
+
+2. **Serve the Next.js app as static files:** If your Next.js app can be exported to static HTML (or mostly static), you can use `next export` to generate an `out` directory of static files. Then Electron’s main process can serve those via a simple file server or using an `app.loadFile`. The Stackademic example followed this approach: they did `npm run build` and `next export` to an `out` folder, and used an Express server in Electron to serve `out` and custom API routes ([Learn how to build a desktop application with Electron and Next.js while also adding API route capabilities. | by Faizk | Stackademic](https://blog.stackademic.com/learn-how-to-build-a-desktop-application-with-electron-and-nextjs-while-also-adding-api-route-ebaf37b0511b#:~:text=proved%20particularly%20challenging%20due%20to,a%20backend%20route%20in%20nextjs)) ([Learn how to build a desktop application with Electron and Next.js while also adding API route capabilities. | by Faizk | Stackademic](https://blog.stackademic.com/learn-how-to-build-a-desktop-application-with-electron-and-nextjs-while-also-adding-api-route-ebaf37b0511b#:~:text=,Step%202%3A%20Configure%20Electron)). You could simplify that by skipping Express if you have no API routes – just load the `index.html` from the `out` directory:
+   ```js
+   mainWindow.loadFile(path.join(__dirname, '../web/out/index.html'));
+   ```
+   And ensure any navigation in-app is handled by the front-end (like a catch-all that serves index.html for any route, which Next’s export often does by client-side routing ([Learn how to build a desktop application with Electron and Next.js while also adding API route capabilities. | by Faizk | Stackademic](https://blog.stackademic.com/learn-how-to-build-a-desktop-application-with-electron-and-nextjs-while-also-adding-api-route-ebaf37b0511b#:~:text=%2F%2F%20Serve%20static%20files%20from,PORT))).
+
+3. **Hybrid approach:** Use Next's server only for dynamic needs (like API routes), and serve static content for the UI. The blog example created an Express `server.js` that *mounted API endpoints and served static files from Next's export* ([Learn how to build a desktop application with Electron and Next.js while also adding API route capabilities. | by Faizk | Stackademic](https://blog.stackademic.com/learn-how-to-build-a-desktop-application-with-electron-and-nextjs-while-also-adding-api-route-ebaf37b0511b#:~:text=There%20are%202%20routes%20that,using%20custom%20express%20js%20server)) ([Learn how to build a desktop application with Electron and Next.js while also adding API route capabilities. | by Faizk | Stackademic](https://blog.stackademic.com/learn-how-to-build-a-desktop-application-with-electron-and-nextjs-while-also-adding-api-route-ebaf37b0511b#:~:text=Adjust%20your%20Electron%20setup%20to,interact%20with%20this%20server)). During `app.on('ready')`, they `require('../server')` to start that Express server, then call `createWindow()` to load `http://localhost:3000` ([Learn how to build a desktop application with Electron and Next.js while also adding API route capabilities. | by Faizk | Stackademic](https://blog.stackademic.com/learn-how-to-build-a-desktop-application-with-electron-and-nextjs-while-also-adding-api-route-ebaf37b0511b#:~:text=,closed%27%2C%20%28%29%20%3D%3E)). This gave them a way to handle Next’s API routes in a desktop context.
+
+Given your application likely needs to manage local files and offline data, SSR might not be critical. You could get away with a static build plus custom logic in the main process for things like file system access. However, if SEO or initial render speed is a concern (for a desktop app, SEO likely isn't, and initial render can be handled by loading state from disk quickly), then static is fine.
+
+**Recommendation:** Start with the simplest solution: *during development*, load the Next dev server; *for production*, consider using `next export` and have Electron load the static files. Then implement any dynamic needs (like reading directories) via IPC calls to the main process (instead of Next API routes). This avoids running a separate Node server in production, reducing complexity.
+
+Now let's implement the Electron main process.
+
+## Implementing a Minimal, Secure Main Process
+
+The Electron **main process** is the entry point that creates application windows and handles OS interactions. We want this to be as minimal as possible – just create a BrowserWindow and set up IPC, deferring all heavy logic to either the renderer or to isolated modules. Additionally, we'll enable key security settings from the start.
+
+**Creating the Browser Window:** In `apps/desktop/src/main.ts`:
+```js
+import { app, BrowserWindow } from 'electron';
+import * as path from 'path';
+
+let mainWindow: BrowserWindow;
+
+function createWindow() {
+  mainWindow = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    webPreferences: {
+      nodeIntegration: false,    // disable Node.js in renderer
+      contextIsolation: true,    // isolate context for security
+      enableRemoteModule: false, // disable deprecated remote
+      preload: path.join(__dirname, 'preload.js') // use a preload script
+    }
+  });
+  // In dev, load the Next dev server URL; in prod, load the index.html
+  if (process.env.NODE_ENV === 'development') {
+    mainWindow.loadURL('http://localhost:4200');
+  } else {
+    mainWindow.loadFile(path.join(__dirname, 'index.html'));
+    // Or mainWindow.loadURL('app://./index.html') if using custom protocol
+  }
+}
+app.on('ready', createWindow);
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') app.quit();
+});
+```
+This is an example structure. Notice the critical `webPreferences`:
+- `nodeIntegration: false` ensures that the renderer (the Next.js front-end) **cannot use Node APIs directly**. This is a cornerstone of Electron security ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=1,e)). Your React code in Next will run in a browser-like environment without `require` or `process` by default.
+- `contextIsolation: true` creates a separate context for the preload script, preventing the webpage from messing with the preload's privileged APIs or prototypes ([Design A Reasonably Secure Electron Framework | Bishop Fox](https://bishopfox.com/blog/reasonably-secure-electron#:~:text=%2A%20%60contextIsolation%60%20,to%20enable%20the%20remote%20module)). This protects against prototype pollution and other attacks, and is recommended to always enable ([Design A Reasonably Secure Electron Framework | Bishop Fox](https://bishopfox.com/blog/reasonably-secure-electron#:~:text=%2A%20%60contextIsolation%60%20,to%20enable%20the%20remote%20module)).
+- `enableRemoteModule: false` turns off the old remote module (which is deprecated due to security issues).
+- We specify a `preload` script path. This script will run **before** the renderer code, and it's the place where we can set up safe bridges between the two.
+
+The above configuration aligns with security best practices: *"Disable Node.js integration in all renderers... Enable context isolation in all renderers... Do not expose entire Electron APIs to untrusted content."* ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=1,e)) ([javascript - How to use preload.js properly in Electron - Stack Overflow](https://stackoverflow.com/questions/57807459/how-to-use-preload-js-properly-in-electron#:~:text=The%20proper%20way%20to%20use,require)). By only allowing controlled communication via preload, we greatly reduce the attack surface.
+
+**Secure main process design:** We keep `main.ts` focused on app lifecycle (create window on ready, quit on all windows closed except on macOS conventions, etc.). If any heavy logic is needed (e.g. scanning a directory), avoid doing it directly in the main thread synchronously as it could block the UI. Instead, handle it asynchronously or in separate processes. For example, if you have to compute something expensive, you might spawn a Node worker thread or child process from main, or handle it in the renderer after all (depending on the task). Since you’ll likely use Node’s file system in main, ensure to use async APIs (promises or callbacks) or offload large operations to avoid freezing the app.
+
+**Loading content:** In dev, ensure the Next app is running first. Nx-electron's `nx serve desktop` might automatically start the frontend project if configured. If not, you could start them separately or adjust the command. In production, if using static files, you might want to register a custom protocol (like `app://`) to serve them. For instance, electron-builder can automatically serve `index.html` via an `app://./index.html` path if configured properly ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=16,APIs%20to%20untrusted%20web%20content)). Or simply use `loadFile` as above.
+
+One more production consideration: **flashing/blinking**. Sometimes loading local files can be a bit slower or show a blank window briefly. You can show a splash screen or loading indicator if needed. But since Next will likely hydrate quickly, this may not be an issue.
+
+## Preload Scripts and IPC (Inter-Process Communication)
+
+The **preload script** is a small script that runs in the renderer context **before** any web code (Next.js) is loaded, but with access to Node and Electron APIs (since it runs in an isolated context that still has Node integration). The purpose of the preload is to define a safe, controlled interface for the renderer to communicate with the main process or Node functionality. 
+
+In our config, we set `preload: path.join(__dirname, 'preload.js')`. Let's implement `preload.js` (or `.ts`) in `apps/desktop/src`:
+
+```js
+const { contextBridge, ipcRenderer } = require('electron');
+
+// Define channels or APIs that the renderer is allowed to use
+contextBridge.exposeInMainWorld('electronAPI', {
+  selectDirectory: () => ipcRenderer.invoke('dialog:openDir'),
+  // ... you can expose more methods for other actions,
+  // for example: getStoreValue, setStoreValue, etc (we'll do that in State Mgmt section).
+});
+```
+
+This is a simplified example. What it's doing:
+- We use `contextBridge.exposeInMainWorld(key, api)` to inject a global `window.electronAPI` (for example) into the renderer. The renderer can call `window.electronAPI.selectDirectory()`, but it cannot directly call `ipcRenderer` or other Node APIs (since those aren't exposed).
+- The `selectDirectory` here calls `ipcRenderer.invoke('dialog:openDir')`, which will send an IPC message to the main process and expect a result (since we use `invoke`, it corresponds to `ipcMain.handle` on the main side).
+- We whitelist only specific channels. For instance, we might allow `'dialog:openDir'` for opening system file dialogs, `'store:get'` for state retrieval, etc. This **whitelisting** approach is recommended: *"The proper way to use preload.js in Electron is to expose whitelisted wrappers around any module your app needs to require"* ([javascript - How to use preload.js properly in Electron - Stack Overflow](https://stackoverflow.com/questions/57807459/how-to-use-preload-js-properly-in-electron#:~:text=The%20proper%20way%20to%20use,require)). We explicitly avoid exposing powerful objects like `ipcRenderer` or `fs` directly. We **do not** do something like `contextBridge.exposeInMainWorld('fs', require('fs'))` – that would give the renderer direct file system access and defeat the security model. Instead, every needed operation is funneled through a controlled API.
+
+On the main process side, you then set up handlers for these IPC channels. For example, in `main.ts` (or a separate file that main imports):
+```js
+const { ipcMain, dialog } = require('electron');
+ipcMain.handle('dialog:openDir', async () => {
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+  return result.filePaths?.[0]; // return the selected folder path
+});
+```
+Now, when the renderer calls `window.electronAPI.selectDirectory()`, under the hood:
+- The preload intercepts that call and sends `dialog:openDir` to main.
+- Main’s handler shows a native folder picker dialog. The user selects a directory.
+- The handler returns the path of that directory.
+- The preload `invoke` call resolves and returns that path to the renderer promise.
+
+This way, the renderer got a directory path from the OS without ever being able to directly call `dialog.showOpenDialog` or touch Node – it went through a *secure, validated channel*. We can add validation or extra checks in main if needed (for instance, ensure it's only called when appropriate).
+
+You will create similar IPC channels for any functionality you need:
+- Reading/writing files (the renderer will ask main to do it).
+- Performing file system operations (move, delete, etc.).
+- Accessing persistent store (the renderer asks main to get or set values, as we'll do with electron-store).
+- Any privileged operations like opening external links (you might have main handle `shell.openExternal` after validating the URL, rather than renderer calling it).
+
+This pattern follows the principle of least privilege. The renderer only gets what it needs, nothing more ([javascript - How to use preload.js properly in Electron - Stack Overflow](https://stackoverflow.com/questions/57807459/how-to-use-preload-js-properly-in-electron#:~:text=Security,remote%20content%2C%20which%20many%20do)) ([javascript - How to use preload.js properly in Electron - Stack Overflow](https://stackoverflow.com/questions/57807459/how-to-use-preload-js-properly-in-electron#:~:text=%2F%2F%20Expose%20protected%20methods%20that,ipcRenderer.send%28channel%2C%20data)). If an XSS vulnerability occurred in your React code, an attacker running in the renderer context would be limited to these small API methods, which you can guard. For example, if you have an API `deleteFile(path)`, you might want to ensure the `path` is something within a permitted directory to avoid an attacker trying to delete arbitrary files. By centralizing in main, you have that control.
+
+**Example Preload implementation:** The BigBinary blog provides a good real-world example of exposing an `electronStore` API via preload ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=import%20,electron)) ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=%7D%3B%20contextBridge.exposeInMainWorld%28)). They create an object with methods `get`, `set`, `subscribe`, etc., and expose it. In your case, you may expose something like:
+```js
+contextBridge.exposeInMainWorld('electron', {
+  store: {
+    get: (key) => ipcRenderer.sendSync('get-store', key),
+    set: (key, value) => ipcRenderer.send('set-store', key, value),
+    // subscribe etc...
+  },
+  fs: {
+    selectDirectory: () => ipcRenderer.invoke('dialog:openDir'),
+    // perhaps other fs methods
+  }
+});
+```
+This would give the renderer a `window.electron.store.get(...)` and so on. Notice they even used `sendSync` for get in that example ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=const%20electronHandler%20%3D%20,store%22%2C%20property%2C%20val%29%3B%20%7D%2C)). Synchronous IPC can block the renderer briefly, but if it's just retrieving a small value, it's usually fine (we'll discuss performance trade-offs in state management). The key is they did not expose the whole electron-store, only specific getters/setters ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=Even%20though%20we%20can%20configure,it%20via%20Electron%27s%20preload%20script)).
+
+To summarize:
+- The preload sets up global functions or objects that the renderer can safely call.
+- Use `ipcRenderer.send`, `invoke`, or `sendSync` under the hood to communicate with main. Use `invoke/handle` for asynchronous calls that expect a result, and `send/on` for fire-and-forget or event messages.
+- Whitelist channels. For example, only allow `toMain` and `fromMain` if you implement a generic messaging, as illustrated in a StackOverflow answer ([javascript - How to use preload.js properly in Electron - Stack Overflow](https://stackoverflow.com/questions/57807459/how-to-use-preload-js-properly-in-electron#:~:text=send%3A%20%28channel%2C%20data%29%20%3D,fromMain)). That answer shows exposing an API where `send(channel, data)` only sends if `channel` is in an allowed list, and similarly for `receive` ([javascript - How to use preload.js properly in Electron - Stack Overflow](https://stackoverflow.com/questions/57807459/how-to-use-preload-js-properly-in-electron#:~:text=contextBridge.exposeInMainWorld%28%20,)). This prevents a renderer from arbitrarily sending IPC messages that you didn't intend to handle.
+- Do not expose Node globals. No `window.require`, no direct `fs` or `process` exposure.
+
+By following these rules, your Electron app will **achieve a high level of security** akin to a regular website, despite having access to native capabilities. Electron's documentation provides a [security checklist](https://www.electronjs.org/docs/latest/tutorial/security) – applying it here: 
+  - We **only load secure content** (our own app, no remote code) ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=1,e)).
+  - Node integration is disabled in the loaded content ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=1,e)).
+  - Context isolation is enabled ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=1,e)).
+  - We will **not disable** `webSecurity` (which controls same-origin policy, etc.) – keep it true unless a specific need arises (disabling it can expose you to XSS from local content) ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=4,Do%20not%20use%20enableBlinkFeatures)).
+  - We can set a **Content Security Policy (CSP)** meta tag in our Next.js HTML to restrict script sources to self, etc., adding defense in depth ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=content%20%206,Verify%20options%20and%20params)).
+  - We won't use `remote` (it's off) and will validate IPC messages (since only known channels are used) ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=16,APIs%20to%20untrusted%20web%20content)).
+  - We will also **limit navigation**: ensure the BrowserWindow cannot navigate to arbitrary external links. By default, loading only our app is fine; if the user tries to navigate away (say, via an external link), you can intercept with `webContents.setWindowOpenHandler` or `will-navigate` event to block or redirect such attempts ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=12.%20,51)). A common practice is to open external links in the user's browser instead of within the app, using `shell.openExternal` and blocking the in-app navigation.
+
+By implementing these, you adhere to Electron's official security recommendations ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=1,e)). In summary, the main process should **only do what is necessary** (create windows, handle file dialogs, etc.), and **expose a minimal API** to the renderer via preload. Everything else (UI logic, rendering, etc.) remains in the Next.js app (renderer). 
+
+## Integrating Next.js Routing in Electron
+
+One question is how Next.js routing works inside Electron. If you load your Next app as usual (either via a local server or static files), the Next.js front-end will handle client-side transitions using its router (the App Router or Link components). From Electron’s perspective, it's just a single-page application running in a Chromium window. No special handling is needed for internal navigation – clicking around Next.js pages will update the content as it would in a browser. 
+
+However, there are a few considerations:
+- **Deep linking**: If a user somehow clicks an external link that attempts to open a different page of your app (for instance, another instance or via a custom protocol), you might want to handle it. Initially, since it's a desktop app, this might not occur unless you register a custom protocol like `myapp://` to open the app. Mac supports deep linking via custom URI schemes and you can capture those in `app.on('open-url', ...)`. This might be future work; at start, you can ignore deep linking or handle it simply (e.g., always open the main window and navigate to a certain route).
+- **Back/Forward buttons**: Electron on macOS will map Cmd+Left/Right to history by default. If not, you might implement global shortcuts or menu items to trigger `window.history.back()`. But Next's client-side router likely handles popstate fine.
+- **404 handling**: If using static export, Next will output an `index.html` and possibly pages for each route (if using `exportPathMap`). If a user navigates directly in the Electron app to an undefined route, you want to ensure it falls back to index and let Next handle 404. The Stackademic approach caught all `app.get('*')` to send index.html ([Learn how to build a desktop application with Electron and Next.js while also adding API route capabilities. | by Faizk | Stackademic](https://blog.stackademic.com/learn-how-to-build-a-desktop-application-with-electron-and-nextjs-while-also-adding-api-route-ebaf37b0511b#:~:text=%2F%2F%20Serve%20static%20files%20from,PORT)). If we avoid running a server, an alternative is to use Hash-based routing (like `#/page`) so that there's actually only one file. But Next doesn’t natively use hash routing. Since we can control navigation in the main process, an easier way: intercept navigation attempts. If the user enters a random URL or file path, intercept and redirect to index. 
+  - If using `BrowserWindow.loadFile`, any in-app navigation that isn't handled client-side might try to load a file that doesn't exist. To prevent a blank screen, you can listen to `mainWindow.webContents.on('did-fail-load', ...)` and, if it's trying to load some `/some-route`, you can redirect to `index.html`. Again, this is only a concern if not all routes exist as static files.
+  - If using a local Next server, Next itself will handle 404s and show its page.
+
+In summary, **routing mostly "just works"** with Next in Electron, as it would in a browser. You don't need any Nx-specific handling for it. If you notice any routing issue (like Electron not correctly mapping pathnames when loading local files), a known solution is to use a **custom protocol**. The nx-electron plugin suggests using the hash strategy or adjusting baseHref for frameworks like Angular ([nx-electron/README.md at master · bennymeg/nx-electron · GitHub](https://github.com/bennymeg/nx-electron/blob/master/README.md#:~:text=command)). For Next, you might instead register `app://` protocol via `protocol.registerFileProtocol` to serve files from your packaged app. Then you could do `mainWindow.loadURL('app://localhost/index.html')` or similar. This ensures all relative links are resolved correctly. However, to keep it simple, you can rely on Next's own client routing and just handle initial load.
+
+## Electron Security Best Practices Recap
+
+Before moving on, let's summarize key security measures we implemented or need to implement in the Electron integration, as this is crucial in a desktop app:
+- **Node Integration disabled in renderer:** Ensures that even though our app is running in Electron, the React/Next code cannot simply call Node APIs. This prevents a rogue script on the page from doing `require('child_process').exec('rm -rf /')` for example ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=1,e)).
+- **Context Isolation enabled:** Preload runs in a separate context, so the web app cannot alter objects in the preload or Electron internal context ([Design A Reasonably Secure Electron Framework | Bishop Fox](https://bishopfox.com/blog/reasonably-secure-electron#:~:text=contextIsolation,to%20ensure%20we%20properly)). This protects against attacks like prototype pollution where malicious JS could tamper with default objects to trick the preload or main code.
+- **Preload with contextBridge:** We expose only safe, whitelisted APIs ([javascript - How to use preload.js properly in Electron - Stack Overflow](https://stackoverflow.com/questions/57807459/how-to-use-preload-js-properly-in-electron#:~:text=The%20proper%20way%20to%20use,require)). We never expose `require` or whole objects that include powerful methods.
+- **Sandboxing:** Optionally, you can enable the `sandbox: true` option in BrowserWindow webPreferences. This further sandboxes the renderer process (removing even some Electron APIs). With contextIsolation and no NodeIntegration, sandbox is less critical but still adds another layer. We could enable it if everything still works; some contexts require adjusting preload usage slightly. Many apps do enable it for defense in depth ([Design A Reasonably Secure Electron Framework | Bishop Fox](https://bishopfox.com/blog/reasonably-secure-electron#:~:text=contextIsolation,to%20ensure%20we%20properly)).
+- **Secure Content Loading:** We are not loading any remote URL (except localhost in dev). In production, everything is local files. This avoids the biggest no-no: *"Under no circumstances should you load and execute remote code with Node integration enabled"* ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=warning)) – which we aren't. If in the future your app needs to display external web content (e.g., an OAuth login page or an external help site), open those in a separate **BrowserView** or system browser, or at least in a BrowserWindow with NodeIntegration off and possibly sandboxed.
+- **Content Security Policy:** Add a `<meta http-equiv="Content-Security-Policy" ...>` in your Next.js HTML (you can add it in `_app` or a custom `_document`) to restrict script sources. You can set it to only allow scripts from `'self'` (which in our case means the app's own code) ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=content%20%206,Verify%20options%20and%20params)). This way, even if an attacker managed to inject a script tag, the browser (Electron) would refuse to load it if it’s from an unapproved source.
+- **Disable new window creation:** By default, if a script calls `window.open`, Electron will try to open a new window. We likely don't need any new windows in this app. It's wise to override this: 
+   ```js
+   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+     // open external links in browser
+     const isExternal = /^https?:/.test(url);
+     if (isExternal) {
+       require('electron').shell.openExternal(url);
+       return { action: 'deny' };
+     }
+     // Otherwise, prevent all new windows
+     return { action: 'deny' };
+   });
+   ```
+   This ensures no popup can be created without your control ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=12.%20,51)) ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=14,APIs%20to%20untrusted%20web%20content)).
+- **Validate IPC messages:** We have effectively done this by whitelisting channels. In the main process, only handle the channels you expect. If you use `ipcMain.on` for something broad, always verify the sender if needed (e.g., `event.senderFrame.origin` if dealing with multi-origin, but in our case it's all our app). The security checklist item is *"Validate the sender of all IPC messages"* ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=16,APIs%20to%20untrusted%20web%20content)) – by limiting channels, the sender is implicitly our renderer. If you ever accept data via IPC, validate its content.
+- **Avoid `eval()` and unsafe APIs:** Don’t use `webContents.executeJavaScript` unless necessary, and if you do, do not include unsanitized input. It's better to communicate via IPC and have the renderer run logic. Also set `worldSafeExecuteJavaScript: true` if using any executeJavaScript (this is true by default since Electron 12).
+- **Updates**: When implementing auto-updates, apply the same caution. Only fetch updates from a secure, verified source (HTTPS, code-signed packages). We’ll cover updates later, but note that serving update files over HTTP or from untrusted sources could be dangerous (someone could MiTM and deliver malicious code). We'll ensure updates are signed and verified.
+
+By following these practices (many of which we've already set up), we align with Electron's security recommendations ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=1,e)). For example, to quote Electron’s checklist:
+> 2. Disable the Node.js integration in all renderers that display remote content.  
+> 3. Enable context isolation in all renderers.  
+> 4. Enable process sandboxing.  
+> 6. Do not disable webSecurity.  
+> 7. Define a Content-Security-Policy ...  
+> 17. Validate the sender of all IPC messages.  
+> 20. Do not expose Electron APIs to untrusted web content ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=1,e)) ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=14,APIs%20to%20untrusted%20web%20content)).
+
+Our setup checks off (2), (3), (6), (17), (20), and partially (4) if we enable sandbox, etc.
+
+With the Electron shell in place, next we'll focus on how to manage application **state and data** between the web and desktop contexts, ensuring a seamless experience.
+
+# Hybrid State Management
+
+In the current Next.js app, you use **Zustand** for state management. Zustand is a client-side state store (often in React apps, it's used to hold component state outside of React context). Now that we have a desktop app, we want to leverage the same state logic, but also persist and share state in ways a web app normally couldn't. Specifically, we want to integrate an **Electron-compatible storage** (like `electron-store`) to persist data (for offline use, preferences, etc.), and possibly have parts of the state synchronized between the main and renderer processes.
+
+This section explores how to **combine Zustand with persistent storage** (electron-store) and how to manage state in both the web and Electron contexts. We need to consider that:
+- The web app (when running in a browser) might only have access to `localStorage` or IndexedDB for persistence.
+- The desktop app can use `electron-store` (which writes to a JSON file on disk) for more robust persistence and larger data.
+- We might want to keep the programming model the same: e.g., use Zustand in both, but with a custom persistence layer that uses electron-store when available, and falls back to localStorage on web.
+- Also, if the desktop app uses both renderer and main to manipulate state, we might need to sync changes. (For example, if main process changes some data in electron-store due to an OS event, the renderer should update its UI.)
+
+## Using Zustand with Persisted Storage
+
+Zustand has a middleware for persisting store data. On the web, developers often use it with `localStorage` or `IndexedDB`. In our monorepo, we can configure Zustand's persist such that:
+- If running in a web browser (no Electron), use `localStorage` as before.
+- If running in Electron, use a custom storage that calls `electron-store`.
+
+Zustand’s `persist` middleware allows providing a storage object with `getItem`, `setItem`, `removeItem` methods ([Persisting store data - Zustand](https://zustand.docs.pmnd.rs/integrations/persisting-store-data#:~:text=The%20Persist%20middleware%20enables%20you,thus%20persisting%20its%20data)). We can implement those methods to use IPC calls to electron-store:
+```js
+import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
+
+const isElectron = typeof window !== 'undefined' && window.electron?.store;
+
+const useStore = create(
+  persist(
+    (set, get) => ({
+      // ... your state and actions ...
+      someValue: '',
+      setSomeValue: (val) => set({ someValue: val })
+    }),
+    {
+      name: 'app-state',
+      storage: isElectron 
+        ? {
+            getItem: (key) => window.electron.store.get(key),
+            setItem: (key, value) => window.electron.store.set(key, value),
+            removeItem: (key) => window.electron.store.delete(key)
+          }
+        : {
+            getItem: (key) => localStorage.getItem(key),
+            setItem: (key, value) => localStorage.setItem(key, value),
+            removeItem: (key) => localStorage.removeItem(key)
+          }
+    }
+  )
+);
+```
+This sketch illustrates using `window.electron.store` (which we exposed in preload) if available, otherwise falling back to localStorage. Now, in the renderer:
+- On web: `window.electron` will be undefined, so Zustand uses localStorage, just as a normal web app. Users can have some limited offline capability using the browser's storage (subject to its size limits and no access to OS files).
+- On desktop: `window.electron.store` exists (from preload), so the store's persistence calls go through electron-store. That means any state we mark as persistent will be saved to the file on disk via the main process.
+
+**Electron-Store usage:** Electron-store saves to a JSON in the user’s data path (like `~/Library/Application Support/YourApp/config.json` on macOS) ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=Since%20Electron%20doesn%27t%20have%20a,app.getPath%28%27userData)). It's simple and convenient for preferences or moderate amounts of data. It's not a database, but for many app settings or even caching some data, it's sufficient. The good news: it's synchronous API (for convenience), but that means calling `store.set` on the main process will block briefly during file write. We'll discuss performance in a moment.
+
+**Separate vs Unified store:** One question is whether to have **one Zustand store** that includes all state (and perhaps persists parts of it), or to have multiple stores (like separate zustand stores for UI state vs persistent data). Zustand allows multiple store instances easily. You might decide:
+- Use one primary store for core app state and persist it. E.g., an object in state like `{ files: [...], userPreferences: {...}, transientUIState: {...} }` where some parts are flagged to persist.
+- Or use one store for ephemeral UI state (not persisted, like current search query, etc.) and a different store for persisted settings.
+
+Given a solo dev scenario, keeping it simple with one store is fine, as long as you carefully decide which values to persist. Zustand's `persist` can blacklist or whitelist specific parts of the state to store. For example, you might persist `userPreferences` and `lastOpenedFolder`, but not persist something like `isModalOpen`.
+
+**Synchronization between processes:** If the main process also needs access to state (which in many Electron apps it might not, beyond the store file itself), you have to ensure changes propagate. With the above approach, the source of truth for persisted state is effectively the JSON file (accessed via electron-store). The renderer writes to it when state changes (through `setItem`), and reads from it on startup (`getItem`). 
+
+What if the main process changes the store? For example, maybe the main process watches the file system and updates some state (like `files` list) in the store. If it uses electron-store to set a value, the renderer's Zustand store should update. But Zustand wouldn’t know about changes made outside of its own `set` calls. 
+
+To handle this, we need a mechanism to **notify the renderer** of updates that happen in main. The BigBinary article demonstrates a solution: using electron-store’s `onDidChange` event to broadcast changes to all renderer windows ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=to%20use%20to%20create%20synchronization)) ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=ipcMain.on%28%22subscribe,subscriptions.set%28key%2C%20unsubscribeFn%29%3B)). They set up an IPC channel `onChange:key` that the preload subscribes to, and main calls `BrowserWindow.getAllWindows().forEach(win.webContents.send(...))` to propagate changes ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=electron)) ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=import%20Store%20from%20%22electron)). In our case, if you expect main to modify state behind the scenes (e.g., in response to an OS event or an auto-update of data), implementing a similar pub-sub is wise:
+- In main: 
+  ```js
+  const store = new Store();
+  store.onDidChange('someKey', newValue => {
+    sendToAll(`store-changed:someKey`, newValue);
+  });
+  ipcMain.on('subscribeStore', (event, key) => {
+    // could dynamically subscribe if needed
+  });
+  ```
+- In preload:
+  ```js
+  contextBridge.exposeInMainWorld('electron', {
+    store: {
+      // ...
+      onChange: (key, callback) => {
+        ipcRenderer.on(`store-changed:${key}`, (_event, newVal) => callback(newVal));
+      }
+    }
+  });
+  ```
+- In renderer usage, you could then do:
+  ```js
+  useEffect(() => {
+    window.electron.store.onChange('someKey', newVal => {
+      setSomeState(newVal);
+    });
+  }, []);
+  ```
+However, if you integrate with Zustand, you might integrate this at the store layer: possibly using Zustand's `subscribe` to trigger an IPC event on changes, and vice versa.
+
+An alternative approach is to **let the renderer be the single source of truth for state** and have the main process just request things via IPC when needed, rather than writing to the store itself. For many apps, the main process might not need to independently change state; it might just respond to commands from the UI. For example, when the user uses the UI to rename a file, the renderer dispatches an action, main performs it on disk, and then renderer updates its state accordingly. In that flow, main doesn’t spontaneously change state on its own; it just does work and maybe returns a result.
+
+So, consider your app’s requirements:
+- If you need **bi-directional sync** (e.g., main monitors something like file system changes that should reflect in UI without user action), implement an event system (like above).
+- If state mostly changes via user interactions in the UI, you can keep a simpler model where the renderer’s Zustand store is authoritative for state, and it calls main when it needs to do something (like read/write files), then updates itself.
+
+**Trade-offs and Performance:**
+- **electron-store blocking**: `electron-store` calls are sync in main. Frequent writes (say on every small state change) could degrade performance. For example, if you have a state that changes very often (like window size as a user drags a resizer, or a text input value), you wouldn't want to persist every single change instantly. A strategy is to batch or throttle persistence. Zustand persist middleware doesn’t throttle by itself; it writes on every `set`. You can customize it or only persist certain changes. Perhaps mark only less-frequent events for persistence (like after closing a modal, persist that it was closed, etc.).
+- **Using `ipcRenderer.sendSync`**: In the example, using `sendSync` in preload to get a value is convenient for initializing the store (the renderer blocks until main returns). This is okay during startup to quickly get initial state (like user settings) before rendering. But avoid sync calls during normal operation because it ties up both processes briefly. Use async `invoke` for anything that can take time (like reading a large file).
+- **State size considerations**: If your app’s state is potentially large (e.g., storing a huge list of files in Zustand), electron-store will attempt to serialize that in the JSON. Very large JSON can be slow to write/read. If you anticipate thousands of entries, consider storing them differently (perhaps a database or separate file). But electron-store can handle moderate sizes (a few MB probably) fine. It’s meant for app config and small data.
+- **Memory vs disk**: Zustand (and the renderer) holds state in memory for speed. electron-store ensures persistence to disk. There’s a slight complexity that you have data in two places (renderer memory and main’s file). But with proper sync (or with the renderer always writing through to main), they should stay consistent.
+- **Multiple windows**: If you ever allowed more than one window of the app open, each renderer would have its own instance of the Zustand store. Syncing between them becomes important (which is why BigBinary built the broadcast system ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=electron))). As a solo developer with Mac-first focus, you might allow only one main window (like many Mac apps). If so, that simplifies things: one renderer, one store. If later extending to multi-window, ensure the above onDidChange broadcasting is in place so all windows stay in sync (e.g., a change in one is sent to others).
+
+**Best practices:**
+- *Keep one source of truth for any piece of state.* If you use electron-store as the persistence, decide whether the source of truth is the in-memory Zustand or the file. Often, the pattern is: load from persistent storage on launch (to hydrate the Zustand store), then treat the in-memory store as primary during runtime, and write to disk on changes for next launch or backup. This way, you avoid constantly reading from disk – you mostly write after changes. This is similar to how a browser app might load from localStorage once, then keep state in memory until page refresh.
+- *Encapsulate state logic in the lib:* Since you moved state logic to `libs/state`, that lib can provide hooks or functions for components to use. For example, you may have `import { useMyStore } from '@myorg/state';`. That hook internally uses Zustand. Abstracting this way means if you later switch out Zustand or change persistence logic, the component usage stays the same.
+- *Synchronize explicitly when needed:* If, say, the main process handles offline syncing (e.g., downloading new data from server in background and updating the store), have it notify the renderer of updates. You could even have the main process dispatch actions to the renderer's Zustand store via a small RPC. For example, expose an IPC `state:update` that sends a partial new state, and in the renderer have an effect to apply it to the store.
+
+**Combining Web and Desktop stores:** What about when the user uses both the web app and desktop app at different times? If you want to sync data between them (e.g., user did something in web app in browser, then later opens desktop app), you'll need a back-end or cloud sync, or a way to import/export state. This might be beyond scope (and possibly not needed if the desktop app offers superset of functionality). However, you could consider allowing the web version to export a file or use some cloud account to sync settings, which the desktop could import. Given "offline-first", likely the desktop is considered the primary offline client, and web might be secondary or just for access on other machines.
+
+In summary, **strategy**:
+- Use Zustand in both contexts for consistency.
+- Use `electron-store` via a custom persistence layer in Zustand for Electron.
+- The `libs/state` can detect environment (electron vs web) and configure accordingly.
+- Keep the API the same for components – they call e.g. `useStore((s) => s.someValue)` and `useStore.getState().setSomeValue(x)` and Zustand/persistence takes care of where it goes.
+- Ensure that critical state is saved to disk on desktop so that if the app is closed or offline, it comes back with that state (this covers offline mode needs to some degree).
+- For any state that both main and renderer might change (like a download progress, etc.), implement IPC pub-sub so both sides stay in sync.
+
+## Synchronizing State and Data
+
+Let's delve a bit more into an example of syncing state. Suppose your app keeps a list of files in Zustand state (perhaps representing a directory structure). When running as a desktop app, you might rely on the main process to watch the filesystem for changes (using `fs.watch` or `chokidar`). If a file is added or removed externally, the main process gets that event. Now, how to update the UI? Two options:
+1. Main process directly updates electron-store and triggers an `onDidChange` event. The renderer (Zustand) sees the change via the subscription and updates its state.
+2. Main process sends an IPC to the renderer like `ipcMain.emit('file-added', fileInfo)` and you handle that in the renderer by calling a Zustand action to add the file. This bypasses writing to disk first.
+
+Option 2 might be more immediate and avoids unnecessary disk I/O for transient events. You can still persist the new list eventually. For instance, when main detects a file added:
+- It tells the renderer to add it to state.
+- The renderer adds to Zustand (state updated in memory).
+- The persist middleware then writes the updated list to electron-store in the background.
+
+This way, one source of truth (the renderer state) is driving the persistence. 
+
+However, if your app can run while closed (maybe as a background process) and monitor things, that complicates it. But likely, if the app is closed, you don't need to track state until it's reopened (at which point it can rescan or read the stored state).
+
+**Performance considerations for sync:**
+- Using events (IPC) is quite fast for small payloads. But sending thousands of items over IPC could be slow. If syncing large lists, consider batching them. For example, if a folder has 10,000 files, don't send an IPC for each; maybe send one event with the whole list or a diff.
+- electron-store’s `onDidChange` triggers on **every** change to the store, which could be often if state is frequently updated. So you wouldn't want to attach `onDidChange` on something extremely volatile. Use it for things like user preferences or for cross-window sync, not for something that is updated 60 times a second.
+- There's also a possibility to use a more reactive state solution across processes. Some developers use something like **Redux** in the main process and sync actions with the renderer, or even use **MobX** with a shared backend. But those add complexity. Zustand with manual IPC sync is fine.
+
+**Best practices summary:**
+- *Keep state management logic in one place (your Zustand store in libs/state)* – so both app flavors behave the same.
+- *Use abstraction to handle environment differences* – e.g., the custom storage driver as shown. Possibly use dependency injection: the `libs/state` could export a function to configure the store with a given storage backend (web or electron).
+- *Test the state flows in both environments* – e.g., on web, does data persist and rehydrate properly (maybe via localStorage)? On desktop, does it persist via electron-store and reload correctly when restarting the app? Do changes reflect immediately in the UI? 
+- *Be mindful of memory vs disk vs performance.* Storing everything in one giant store might be easy, but sometimes splitting makes sense (for instance, a very large data set might be better to not keep fully in memory and instead query on demand – but that veers into app-specific considerations).
+
+For completeness, note that Zustand isn’t the only option in Electron – you could use `ipcRenderer.invoke` for each data fetch without any front-end state, or use frameworks like React Context or Redux with a background. But Zustand is lightweight and works in React, so it’s a fine choice to continue with.
+
+By combining it with `electron-store`, we achieve:
+- **Persistence**: so that state (like cached directory info, user preferences, etc.) is saved offline. The web version can only cache in browser storage which is more limited and not truly filesystem-level, so the desktop has an advantage here (fast disk access, no size quotas beyond disk size, and binary data if needed via file system directly).
+- **Offline capability**: even if the machine is offline or the user closes and reopens the app, the state can be restored from disk, which is crucial for offline-first behavior.
+
+Next, we will address **file system access** and performance specifically, which ties into state management (because a lot of state likely revolves around file data).
+
+# File System Access & Performance Considerations
+
+One major motivation for moving to Electron is to leverage **native file system APIs** for better performance and capability, compared to the browser’s limited File System Access API. In the Next.js web version, you might have used the File System Access API (or older methods) to let the user pick directories and read files. Electron, on the other hand, has direct access to the OS file system through Node's `fs` module, without user prompts each time, and can use OS-specific features like file watchers.
+
+Let's break down how to efficiently handle file system operations and large directory structures in the Electron context, and what pitfalls to avoid to maintain performance:
+
+## Native File System Integration
+
+**In the browser:** The File System Access API (available in Chromium-based browsers) allows a web app to read/write to user-selected files and folders. It’s a big improvement for web apps, but it still requires user consent for each location and operates within browser sandbox rules. It's also not universally supported (e.g., not in Firefox) ([javascript - Browser-side JS: File System API vs File System Access API? - Stack Overflow](https://stackoverflow.com/questions/67344909/browser-side-js-file-system-api-vs-file-system-access-api#:~:text=,US%2Fdocs%2FWeb%2FAPI%2FFile_System_Access_API)). Performance-wise, it's generally fine for moderate tasks, but reading thousands of files through that layer can be slow or memory-intensive, and there's no straightforward way to monitor changes to the filesystem from the browser.
+
+**In Electron:** We have full Node access. This means:
+- You can use `fs` (or `fs/promises`) to read and write files directly, without user prompts (after initial permission, like the user selecting a folder via a dialog).
+- You can list directory contents using `fs.readdir` (with options to get stats).
+- You can use libraries like **chokidar** or Node's `fs.watch`/`fs.watchFile` to watch for changes in the file system and get events when files are added/removed/modified.
+- You can access OS-specific features, like symbolic links, permissions, extended attributes – things that the browser API might not expose.
+
+**Approach:**
+- When the user wants to select a directory to work with (say to manage files), use the `dialog.showOpenDialog` with `{ properties: ['openDirectory'] }` (as we did with IPC above). Once you have a directory path, you can store it (persist in state) and start scanning it.
+- Use Node's file functions to retrieve the directory structure. For example:
+  ```js
+  const fs = require('fs').promises;
+  async function readDirectoryRecursively(dir) {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    // You can map over entries to get details
+    for (let entry of entries) {
+      if (entry.isDirectory()) {
+        // maybe limit recursion depth or handle separately
+      } else {
+        // entry is a file, you can get stats if needed:
+        const stats = await fs.stat(path.join(dir, entry.name));
+      }
+    }
+  }
+  ```
+  This will be much faster than any browser method, especially since it's all local. But be cautious: if the directory is huge (say tens of thousands of files), doing this all at once will still be slow and could block the event loop if not careful. Always use the async versions (as above with promises) so the main thread is not blocked. Even then, doing 10k `fs.stat` calls sequentially will take time. Consider strategies:
+  - **Pagination or virtual scrolling**: Instead of reading every single file upfront, you might initially just read top-level entries to display them, and only delve deeper or fetch details on demand (lazy loading subfolders when the user expands them).
+  - **Web Workers / Additional Processes**: In Electron, you could spawn a background process or use a worker thread for reading a massive directory, so that the main process stays responsive. The worker can communicate back via IPC or even by writing to a file store that main monitors.
+  - However, often using asynchronous I/O is enough, because Node will handle many file I/O operations in parallel internally (libuv thread pool). 
+
+- **File watchers**: Implementing watchers can greatly enhance performance for updates. For instance, if your app displays a directory tree, you normally would have to refresh it to catch new files. With watchers:
+  - Use `fs.watch` or better, **chokidar** (which is a robust wrapper that handles recursive watching on all platforms). Chokidar can watch a directory and emit events like `add`, `change`, `unlink` for files. You can then update your Zustand state accordingly when these events fire. This is far more efficient than polling or rescanning periodically.
+  - Example with chokidar in main:
+    ```js
+    const chokidar = require('chokidar');
+    const watcher = chokidar.watch(dirPath, { ignoreInitial: true });
+    watcher.on('add', filePath => { 
+      // notify renderer that filePath was added
+      mainWindow.webContents.send('fs:add', filePath);
+    });
+    watcher.on('unlink', filePath => {
+      mainWindow.webContents.send('fs:remove', filePath);
+    });
+    // ... etc for 'change'
+    ```
+    Then in renderer, you’d handle these events (perhaps by updating the Zustand store to add/remove the file). Or you could have main directly update electron-store and let your store sync handle it. But direct event may be simpler for immediate UI update.
+  - Be mindful of watcher limits: Watching an extremely large tree (thousands of files) can consume resources. Chokidar is quite efficient but uses Node's `fs.watch` or `fs.watchFile` under the hood. On macOS, `fs.watch` is fine (uses efficient FSEvents), on Windows it uses ReadDirectoryChangesW, etc. Just ensure you close watchers when no longer needed to free resources.
+
+- **Reading file content**: If your app needs to read file contents (not just list them), Node can do that too (synchronously or async). For large files, use streams to avoid memory bloat:
+  ```js
+  const readStream = fs.createReadStream(filePath);
+  readStream.on('data', chunk => { ... });
+  ```
+  Or if it's textual and you need it in renderer, you might do `fs.readFile` and send the content. But sending huge content via IPC can be slow – consider sending just path and have the renderer call again when needed, or process the file in main and only send processed result.
+
+**Comparing with Browser FS API performance:** In the browser, reading a large directory is cumbersome: you might have to recursively get directory handles, then file handles, and read each file – each step maybe involving async promises and possibly user permission if you go too deep. It also might not allow truly recursive enumeration easily due to security (the new API does allow recursive reads with proper flags, but it's new). In Electron, no such issues: you have full trust.
+
+Also, the **browser FS API is not available in all browsers** ([javascript - Browser-side JS: File System API vs File System Access API? - Stack Overflow](https://stackoverflow.com/questions/67344909/browser-side-js-file-system-api-vs-file-system-access-api#:~:text=,US%2Fdocs%2FWeb%2FAPI%2FFile_System_Access_API)), but Electron runs on Chromium so it would be available there too. But since we have Node, we bypass it entirely for consistency.
+
+## Handling Large Directory Structures Efficiently
+
+If your app deals with potentially **large directories (thousands of files/subfolders)**, performance and responsiveness become critical. Several strategies help:
+- **Lazy Loading**: Do not load everything at once if you don't have to. If you have a tree view, load subfolders when the user expands a node, not all on startup. This reduces initial cost and memory.
+- **Virtual Scrolling Lists**: Use libraries like `react-window` or `react-virtualized` for rendering long lists of files. This ensures that if you have, say, 10,000 items, only perhaps 20-50 are actually rendered DOM elements at any time (just the ones in view). This keeps the React app snappy. If you have a grid or tree, similar virtualization techniques apply. Many file manager apps implement virtual scrolling.
+- **Caching**: Once you read a directory structure, cache it in memory (Zustand state) so you don't hit disk repeatedly for the same data. You might also cache some metadata (like file icons or previews) to avoid recomputation. If the filesystem changes, update the cache incrementally via watchers as above, instead of dumping and re-reading everything.
+- **Debounce expensive operations**: If the user triggers something like searching through files, implement debouncing and perhaps run the search in a background thread (especially if searching file contents). This is more about UI responsiveness.
+- **Memory usage**: Storing a huge list in Zustand means it lives in the renderer memory. That could be heavy if extremely large. If you only need to display part at any time (which is usual with virtualization), it's fine. If you need to hold a full index of files (for searching), consider storing just what you need (like names and paths, not entire file content obviously).
+- **Native code for heavy tasks**: In some extreme cases (maybe not needed here), using a native addon or external tool for certain tasks can speed things up. For example, calculating checksums of huge files could be offloaded, but Node can handle quite a lot on its own with streams.
+
+**Addressing browser-based bottlenecks when migrating:** On web, you might have faced:
+- Requiring the user to pick a directory each session (lack of persistent access).
+- Slow enumeration of files or lack of ability to monitor changes (no native watchers, only polling).
+- Limited ability to handle very large sets due to memory or browser sandbox.
+- Possibly issues with path names (the browser handles file handles, not raw paths).
+- In Electron, these bottlenecks are removed:
+  - Persistent access: once the user selects a folder, you can remember that path (persist in electron-store as "lastOpenedPath") and next time auto-open it (you might still need to ask permission on Mac via system dialog if you want to access it without user action at launch, but if you do it after app open with user action, it's fine).
+  - Monitoring: watchers as described.
+  - Performance: Node file I/O is quite fast and C++ under the hood. The only thing to watch is not blocking the event loop. But using async/await or separate threads solves that. Also, reading/writing large files is limited by disk speed, but you can show progress etc.
+  - UI blocking: In a browser, heavy computation would block the single JS thread. In Electron, the renderer still has that limitation (so heavy computation in React app would freeze the UI). Offload heavy computations either to the main process or to Web Workers in the renderer if needed. For file I/O, Node’s async methods do not block UI because they run in the Node thread pool separate from the renderer's JS thread.
+
+**Example performance win:** Suppose in the web app, reading a directory of 1000 files might have taken a noticeable time with the file picker API (especially if it had to request each file handle). In Electron, `fs.readdir` on 1000 files is usually a blink-of-an-eye operation (maybe a few milliseconds). Getting stats for each might add some latency, but still likely under a second total for 1000 files. With watchers, subsequent changes are instant vs having to rescan periodically in a web app.
+
+**Precaching vs On-demand:** If your application often needs to know the entire directory structure (for say an offline search of files), you might do an initial scan and keep it. That’s fine if it’s not too large or if the user is willing to wait a moment. Provide feedback (like a progress bar or count of files scanned) if scanning potentially large trees to manage expectations. Alternatively, only index as needed or in background after showing UI.
+
+**Use of Worker Threads:** If your Electron main process is doing a lot of FS work (which is CPU-bound or synchronous by nature), Node 16+ has Worker Threads that allow JS code to run in parallel. You could use that for very heavy indexing or processing, and communicate via messages. This prevents the main event loop from lagging (which could cause the app to not respond to clicks if you inadvertently blocked it). Evaluate if needed once you test.
+
+In short, **Electron opens the door for near-native performance** for file operations:
+- Use Node’s `fs` for raw speed and flexibility.
+- Use native OS notifications (watchers) instead of manual re-checks.
+- Implement UI techniques (virtual lists) to handle large data gracefully.
+- Avoid unnecessary work: no re-reading files that haven’t changed; no rendering of offscreen items, etc.
+
+By addressing these, your desktop app will handle large directories and file operations far more smoothly than the browser app could.
+
+Finally, we'll consider **offline mode and auto-update** aspects of the app, which involve both state and file considerations.
+
+# Offline Mode & Auto-Updates
+
+One advantage of a desktop app is the ability to function offline more robustly than a web app and manage its own updates. We will outline how to ensure the app works offline-first, caching necessary data and syncing when possible, and how to implement auto-updates (with a focus on macOS) to keep the app up-to-date without requiring manual downloads.
+
+## Offline-First Functionality
+
+**Offline Mode Strategy:** *Offline-first* means the app should be fully usable without an active internet connection, and then gracefully sync or update once connectivity is restored ([Local First / Offline First | RxDB - JavaScript Database](https://rxdb.info/offline-first.html#:~:text=Local,persistent%20changes%20in%20application%20state)). Even if your app primarily deals with local files, consider any features that rely on cloud or server (like maybe a cloud backup or fetching metadata). Those should be optional or queued when offline.
+
+Key approaches:
+- **Cache critical data locally:** If your app uses any external API or cloud service, implement a cache. For instance, if on web you fetched something (like file thumbnails from a service or user profile info), on desktop store that data in a file or in electron-store. Use it when offline.
+- **Local-first data storage:** As described with electron-store and possibly a database (like SQLite or Dexie for browser), keep the source of truth locally ([Local First / Offline First | RxDB - JavaScript Database](https://rxdb.info/offline-first.html#:~:text=Local,persistent%20changes%20in%20application%20state)). When online, sync the local data to the server rather than pulling fresh every time. This way, offline use is just using the local copy.
+- **Queued updates:** If the user does something offline that needs to be sent to a server (e.g., they edit a note that should sync to cloud), queue it and mark it as pending sync. When connection returns, automatically send the queued changes. This could be implemented by marking items in electron-store or a local DB with a "pending" flag, and having a background job that checks connectivity and sends them.
+- **Detection of connectivity:** The renderer can listen to `window.navigator.onLine` events or use Node’s network module to detect if internet is reachable. Alternatively, attempt a quick ping to your server on an interval. When transitioning from offline to online, trigger the sync routine.
+
+**Working as well offline as online:** The UX should not degrade severely offline. For example:
+- All main features (like browsing and organizing local files) should work identically offline. Only cloud-specific features would be unavailable, and the app should indicate that (e.g., "Can't connect to cloud, will sync later" rather than failing).
+- Use clear indicators if data is stale due to offline (e.g., if showing a list of items that normally updates from server, and now it's using cached data, maybe mark it as offline mode).
+
+**Caching implementations:** For content caching beyond just key-values, you might consider using a database. For example, if the app had large structured data or lots of records to sync, an embedded database like SQLite or PouchDB could be used. But if your data is mostly file lists and user settings, electron-store JSON may suffice.
+
+**Service Workers / PWA vs Electron:** In web, one would use a Service Worker to cache files for offline (making the app a Progressive Web App). In Electron, you don't need a service worker for your own files (they are packaged with the app). But if you are accessing remote content, you can still use caching strategies. Electron’s `session` module allows setting a custom cache or using HTTP cache for requests. For example, if your app fetches some images from the internet, they will by default use Electron/Chromium's disk cache which will serve them offline if cache headers allow.
+
+**Example offline scenario:** Suppose your app fetches a list of recently modified files from a remote server (just hypothetical). In offline mode, you want to show the last fetched list stored from when it was online. You'd implement:
+- On fetch success, save the data to local storage (electron-store or a JSON file).
+- If fetch fails due to no network, load the saved data and inform the user it's possibly not up-to-date.
+- When network is back, fetch again and merge any local changes.
+
+By doing this, offline-first design ensures continuity of user experience. 
+
+Beyond data: consider features like **login**. If your app requires login to a service, allow an "offline login" if possible (e.g., use cached credentials/token so user can still use app offline after first login). Or at least let them continue if they were already logged in before losing connection.
+
+**Resynchronization:** Once back online, automatically sync but also handle conflicts or errors gracefully. E.g., if the user made conflicting changes locally vs on another device, you'll need a conflict resolution strategy (last write wins, prompt the user, etc.). This is complex but depends on app domain. For file management, you might not have conflicts unless cloud is involved.
+
+## Auto-Updates in Electron (macOS-first)
+
+One crucial aspect of a good desktop app is **auto-update**: the app should update itself to the latest version without forcing the user to manually download a new installer each time. Electron provides mechanisms for auto-updating. Since you are focusing on macOS first, we will emphasize that, but also note cross-platform differences.
+
+**Auto-update options:** 
+- **Electron Forge**: has an auto-update mechanism (via Electron's built-in `autoUpdater`). It can use services like Electron's "publishers" or a simple static server.
+- **electron-builder with electron-updater**: A very popular solution. electron-builder is a packaging tool, and `electron-updater` is a library that uses the underlying `autoUpdater`. It supports many update "providers" (GitHub Releases, private servers, etc.) and handles downloading and applying updates.
+- **Squirrel**: Older auto-update framework. Electron historically had Squirrel for Windows and Squirrel.Mac. Modern apps often use electron-updater which abstracts these (on Windows it uses NSIS, on Mac it basically uses the built-in updater which leverages Squirrel.Mac internally or uses Apple's APIs).
+- **Manual**: You could roll your own by downloading a package and triggering installer, but it's not recommended.
+
+Given resources, **electron-builder + electron-updater** is a straightforward path. Nx-electron likely integrates with electron-builder under the hood for making installers ([nx-electron/README.md at master · bennymeg/nx-electron · GitHub](https://github.com/bennymeg/nx-electron/blob/master/README.md#:~:text=Packaging%20Nx%20Electron%20Application)), so we can hook into that.
+
+**How auto-update works (with electron-updater):** 
+1. You need a server or location to host the update files. For example, GitHub Releases or an S3 bucket or a private URL. The app will query this location for updates.
+2. When you build your app for distribution, electron-builder will generate:
+   - The app package (e.g., `YourApp-x.y.z.dmg` for Mac, and maybe a `YourApp-x.y.z.zip` or `tar.gz` depending on config).
+   - A small file like `latest-mac.yml` and a blockmap (if enabled for differential updates).
+   - These files contain info about the latest version and hashes.
+3. On app launch (or on an interval), the app’s main process (or a renderer) calls `autoUpdater.checkForUpdates()`. This contacts the update server (which could simply be a static file host serving the latest YAML).
+4. If an update is available, `autoUpdater` will emit events: `update-available`, then it will download the new version in the background.
+5. Once downloaded, it emits `update-downloaded`. At this point, you can choose to automatically restart or prompt the user.
+6. Calling `autoUpdater.quitAndInstall()` will quit the app and install the new version. On macOS, this typically means replacing the .app in Applications with the new one (which the updater does behind the scenes).
+
+**macOS specifics:** 
+- **Code signing**: Very important. macOS will not allow the auto-updater to work unless the app is properly signed (and likely notarized for modern macOS) ([Auto Update - electron-builder](https://www.electron.build/auto-update.html#:~:text=Code%20signing%20is%20required%20on,macOS)). Signing ensures the new app is trusted. If you use electron-builder, configure your Apple Developer signing identity. The build process will produce signed binaries. Also, notarization (sending to Apple for scan) is needed to avoid the “unidentified developer” gatekeeper warning on download. electron-builder can automate notarization if you provide Apple credentials.
+- **Update channels**: Many do it via GitHub. For open source, publishing releases on GitHub is easy, and electron-updater can automatically check GitHub for new releases (with the correct format). For a private app, you might host on a private server or use a service. For starting, you could manually host the files on e.g. an S3 bucket over HTTPS.
+- **Differential updates on Mac**: Historically, differential (binary diff) updates were not as straightforward on Mac as on Windows. electron-updater now does support generating a blockmap for zip files to allow partial download ([Electron-Differential-updater](https://imjselectron.github.io/electron-differential-updater/#:~:text=For%20differential%20updates%20to%20work%2C,builder)) ([Why isn't differential update supported on macOS? #7547 - GitHub](https://github.com/electron-userland/electron-builder/issues/7547#:~:text=Why%20isn%27t%20differential%20update%20supported,Is%20there%20any%20technical)), but it requires the app to be packaged as a `.zip` in addition to .dmg. electron-builder by default builds a dmg and a zip for macOS ([Auto Update - electron-builder](https://www.electron.build/auto-update.html#:~:text=1,need%20to%20explicitly%20specify%20target)). The zip is used by the updater for the actual bytes. Expect that even with differential, on Mac it's usually just downloading the full zip (unless blockmap is enabled and effective). Given apps can be 100+MB due to Chromium, consider using differential updates to reduce data (though macOS users often have broadband, it's still nice).
+- **User experience**: On Mac, many apps (like VSCode, Slack) auto-update silently and just require a relaunch. You can choose:
+  - **Silent update**: Download and install in background, next time user opens app it's updated (or you prompt "Restart to apply update"). This is user-friendly.
+  - **Prompted update**: Show a dialog "New version available, click to update now." If user accepts, do `quitAndInstall`.
+  - I recommend silent or minimal interruption updates for a consumer app. Electron's autoUpdater can notify in the tray or via a dialog if you implement it.
+- **Offline scenario**: If the user is offline, obviously autoUpdater won't find updates. It will just fail silently or emit an error event, which you can log. Once online, it can check. If your app is often offline, maybe check on startup and also periodically (like once a day or allow manual trigger).
+- Ensure that updating does not break any offline data: the user’s data (in electron-store or files) should remain intact across versions. Usually it will, since those are stored in userData folder separate from the app bundle. But if you make breaking changes to data structures, implement migrations (on app startup, detect old version data and convert).
+
+**Implementing with Nx-electron:** If using nx-electron (which uses electron-builder), you'll have a config possibly in `apps/desktop/src/app/options/maker.options.json` ([nx-electron/README.md at master · bennymeg/nx-electron · GitHub](https://github.com/bennymeg/nx-electron/blob/master/README.md#:~:text=Configuring%20static%20packaging%20%2F%20making,options)) or in package.json under `build`. There you specify publish settings. For example:
+```json
+"build": {
+  "publish": [
+    {
+      "provider": "github",
+      "owner": "yourname",
+      "repo": "your-repo"
+    }
+  ]
+}
+```
+This would target GitHub releases. Or provider "generic" with a URL for a generic HTTP server. When you run `nx run desktop:make`, it will produce installers and also (depending on config) upload or prepare for update.
+
+In code, use the `autoUpdater` from electron:
+```js
+const { autoUpdater } = require('electron-updater');
+autoUpdater.checkForUpdatesAndNotify();
+```
+This single call will check and if there's an update, download it, then show a notification to the user that an update is ready (on Windows, autoUpdater does this). On Mac, it might just silently download and you can listen to events:
+```js
+autoUpdater.on('update-downloaded', info => {
+  // e.g., prompt user or just install
+  autoUpdater.quitAndInstall();
+});
+```
+Be sure to call `autoUpdater.checkForUpdates()` at some point when app is ready (and not in dev mode, usually skip in dev to avoid errors). Nx might allow environment detection to not do it during `nx serve`.
+
+**Delta updates:** As mentioned, Windows updates via NSIS are differential by default (with electron-updater). Mac updates via zip can also be differential if blockmap is enabled and if the differences are small, but in practice it may often download the whole zip if differences are big (like any Electron version upgrade). The user likely won't notice; it's automated.
+
+**Background updates:** Ideally, handle updates in the background without interfering with the user:
+- You might want to avoid showing an "Update available, downloading..." modal (unless your app expects long usage times and user might want to postpone an update).
+- Many apps just update on next launch if an update was downloaded in background. For instance, Slack downloads silently and applies on quit/relaunch (and shows a small green refresh icon in UI to indicate an update is ready).
+- For simplicity, you can auto-install as soon as downloaded: this will restart the app automatically. If that’s acceptable (maybe warn the user "The app will restart to finish updating"), do that. Otherwise, schedule it.
+
+**Auto-update on macOS (via Sparkle/Squirrel):** Under the hood, Electron on Mac uses Squirrel.Mac which is conceptually similar to Sparkle (the Mac framework many apps use for updates). It expects a specific feed (the latest-mac.yml we mentioned) and a signed app. If not using electron-updater, you'd have to manually integrate with `autoUpdater` from 'electron' module and host an appropriate feed. But electron-updater simplifies it.
+
+**Testing updates:** It's tricky to test auto-update before releasing. You can test by hosting a dummy update on a local server or by version bumping and running autoUpdater against a local file. Or use electron-builder's "push to GitHub draft" and then run a build pointing to it. Always test in a packaged app; autoUpdater won’t work in `electron .` dev mode (it detects the app name "Electron" and will not run for safety). Some devs set up a fake update server for testing.
+
+**Windows and Linux (future expansion):** 
+- On Windows, autoUpdater will require an installer (like NSIS) and a signed exe (for avoiding SmartScreen warnings). electron-builder can generate an NSIS installer and a `latest.yml`. The process is similar but uses a different mechanism (it will download a `.exe` or `.nsis` package and run it).
+- On Linux, auto-update is usually not integrated unless you use AppImage which can auto-update itself or Snap which updates via store. electron-updater doesn't support Linux by default (it says "no built-in support for autoUpdater on Linux" ([autoUpdater | Electron](https://electronjs.org/docs/latest/api/auto-updater#:~:text=autoUpdater%20,use%20the%20distribution%27s%20package))). One can implement it but many skip it and rely on package managers or AppImage update.
+
+Given Mac-first, focus on signing and publishing for Mac now, and plan Windows signing (.exe code signing certificate) later when needed.
+
+## Ensuring a Smooth Update Experience
+
+To provide a **good UX for updates**:
+- **Download in background**: using `autoUpdater.checkForUpdatesAndNotify()` does this. It will only notify when ready to install, not during download.
+- **Inform the user appropriately**: On Mac, if you call `quitAndInstall` without warning, the app will just restart – for a lightweight app this might be fine (user might not even lose context if you restore state). But it's safer to at least show a brief notification: "Installing update, restarting..." so they aren't surprised. 
+- **Preserve state**: If possible, when restarting for update, restore the UI state (like open folder, unsaved changes). If you have unsaved changes, you might want to prompt "Save your work before update" or even delay update until they finish.
+- **Delta updates**: If concerned about bandwidth or slow internet, ensure differential update is enabled (electron-builder does by default for NSIS and also creates blockmaps for Mac zip). Test that the update package isn't enormous. If it is (like >100MB) and the user has slow internet, maybe allow them to skip if they are in the middle of a task (this is an edge case).
+- **Timing**: Possibly avoid checking for updates right at app startup if startup performance is critical. You could wait a minute after launch to check, so the user can start interacting. This way, any slowdown or blinking caused by update check doesn't affect initial load.
+- **Error handling**: Implement handlers for update errors (`autoUpdater.on('error', ...)`) to log or inform the user if updates fail (e.g., due to network issues). Perhaps allow manual "Check for Updates" in a menu so advanced users can trigger it (common in the app menu).
+- **Automatic updates vs optional**: Decide if you will force updates. If you continuously improve, it's good to keep users on latest for support reasons. But some enterprise users prefer control. You could allow disabling auto-update via a setting, but as a solo dev, supporting old versions can be a burden, so auto-updating everyone is beneficial.
+
+In summary, for the Mac-first launch:
+- Configure electron-builder with proper signing (mac identity, notarization).
+- Possibly use GitHub Releases for simplicity – push your app there, and set publish to GitHub. Then each release you just do `nx run desktop:make --version=x.y.z` and upload (the tool can auto-upload if configured with a GH token). The app will check and update itself from there.
+- Ensure your app politely handles the update (maybe a small dialog "App will restart to apply update" with [Restart Now] or [Later] options if you want to give choice).
+
+Offline note: if an update is downloaded while offline? That scenario doesn't happen; updating requires being online to get it. If offline, the app will just skip updates until online. There's no harm there, except the user might miss an important update if they stay offline for long – but you can't do much about that aside from encouraging them to connect occasionally.
+
+Finally, let's cover some platform-specific considerations before wrapping up with a development roadmap.
+
+# Platform Considerations
+
+Thus far, we've focused on macOS as the primary environment. Developing with a Mac-first mindset means leveraging macOS features and ensuring the app feels native on Mac. However, you intend to expand to Windows and Linux eventually, so it's wise to design with cross-platform in mind, even if testing on those comes later. Let's outline some platform-specific considerations:
+
+## macOS-Specific Features and Design
+
+**Integration with macOS UI/UX:**
+- **Global Menu Bar:** Mac apps typically have a menu bar at the top (with the app name menu, File, Edit, etc.). Electron allows setting `Menu.setApplicationMenu` to create a native menu. Nx-electron might have generated a basic one or none. You should create a Mac-friendly menu with at least the basics: under "YourApp" menu, include About, Preferences, Quit (Electron provides default roles for these). Mac users expect ⌘+Q to quit, ⌘+, to open Preferences, etc. Add menu shortcuts accordingly.
+- **Dock Icon and Behavior:** The app icon will appear in the Dock when running. You can control the dock icon badge (e.g., show a number of notifications via `app.dock.setBadge`). Also implement Dock menu items if appropriate (you can set menu when right-clicking the dock icon, though not common unless needed).
+- **System dialogs and permissions:** On Mac, when accessing certain folders or resources, the OS may prompt for permission (e.g., accessing `~/Documents` might trigger a macOS security prompt in newer versions because of TCC privacy protections). Since we use the file picker for directories, that prompt is handled via the user picking. If you need direct access to Documents or Downloads without user picking, you might hit permission issues. It's safer to always go through user selection for such access to avoid permission denials.
+- **Notifications (Mac):** You can use the HTML5 Notification API or Electron's Notification module. On first use, macOS will ask the user "Allow notifications from App?". Ensure you handle if they deny (maybe just proceed without notifications). For critical things, consider also bouncing the Dock icon or showing dialogs.
+- **Appearance:** Respect macOS conventions like dark mode. Electron can detect dark mode via `nativeTheme.shouldUseDarkColors` or CSS media query. Ensure your styling adapts if possible. Also, support the macOS accent color if you use system GUI elements (though most styling is your own CSS).
+- **Mac-specific APIs:** If relevant, macOS has AppleScript/Automator integration, Touch Bar support (Electron has an API to set Touch Bar buttons if you want), and more. These are optional. Touch Bar might be neat if your app benefits from quick actions. For now, probably not a priority.
+- **File System Differences:** macOS uses `/` as path separator, case-insensitive file system by default (so 'File.txt' and 'file.txt' are same). Windows is case-insensitive too, Linux is case-sensitive. Keep that in mind for any case-sensitive logic. Also, max file name lengths, reserved names (Windows forbids names like `CON`, Mac and Linux are fine). If your app names files, ensure cross-platform safe names.
+- **Line Endings:** If you process text files, note Windows uses `\r\n`, Mac/Linux use `\n`. Likely not an issue unless editing text.
+- **Package Distribution on Mac:** Provide a signed DMG for users to install by drag-and-drop, or a PKG installer if needed. Many devs prefer DMG for simplicity. After notarization, the user can open the DMG and drag app to Applications.
+
+## Windows Considerations (for future)
+
+When moving to Windows:
+- **Path separators:** Use `path.join` or `path.sep` rather than hardcoding '/', because Windows uses `\`. Node's path utilities handle this. If you have stored any paths in config using one style, convert as needed. Perhaps store paths in a normalized form (like always as POSIX style) and convert at runtime.
+- **Filesystem permissions:** Windows typically doesn't restrict file access by default (no TCC like Mac), so you can access user files easily once you have a path. But user directories like Documents are often under `C:\Users\Name\Documents`, which you can get via `app.getPath('documents')`.
+- **Max Path:** Classic Windows APIs have a MAX_PATH of 260 chars. Node might handle long paths if prefix with `\\?\\` in some cases. It's an edge case but if your app deals with very deep file trees, be cautious on Windows. There are ways to enable long paths on modern Windows 10+.
+- **Performance:** Windows file I/O is generally fine. Watching files on Windows has some quirks: `fs.watch` on a directory might not be recursive by default (chokidar covers that by using recursion or polling). Also, large numbers of watchers might hit limits (Windows has an internal limit around ~8000 watches for ReadDirectoryChangesW by default, IIRC). But chokidar mitigates by polling if necessary. Test on a large set to ensure watchers still fire.
+- **Case-insensitivity:** If your logic keys things by file name, remember 'ABC.txt' and 'abc.txt' are the same file on Windows/Mac by default, but different on Linux.
+- **Integration:** Windows doesn't have a global menu bar separate from window; Electron will show the menu bar attached to the app window. Ensure your menu creation code works on Windows (it will, but the style is different). Also consider adding a context menu on the tray icon if you use a tray (common in Windows for background apps).
+- **System notifications on Windows:** Electron's Notification API works (uses the Action Center). Just ensure to set a valid appUserModelId so notifications are tagged with your app name. electron-builder does that automatically in packaging.
+- **Windows-specific UI:** If needed, handle things like the app window controls (maximize/minimize buttons). On Mac they are on top left, Windows top right – Electron handles placement but if you implement custom frameless window, you must adjust for each OS.
+- **Deployment:** Provide an installer (.exe or .msi). electron-builder by default gives an NSIS installer on Windows, which is fine for most cases. Code signing on Windows requires a code signing certificate (from a CA). If you don't sign, modern Windows will show a SmartScreen warning (the "unknown publisher" dialog). It's not fatal, but hurts trust. Plan to sign if distributing widely (maybe after some testing). For early internal tests, unsiged is okay.
+- **Auto-update on Windows:** as discussed, uses NSIS differential packages. Ensure your update server hosts the `latest.yml` and the installer `.exe`. electron-updater handles applying it.
+
+## Linux Considerations (for future)
+
+Linux has many distros, each with different packaging formats (deb, rpm, snap, AppImage, etc.). Some specifics:
+- **File system:** Case-sensitive (be careful if you ever assumed case-insensitive). Also, most everything is a file – permissions can block access to some directories (like root-owned). But if running as normal user and dealing in home directory, usually fine.
+- **Paths:** Use forward slashes (POSIX). `app.getPath('home')` etc. will give home dir.
+- **Notifications:** On Linux, Electron's Notification integration typically uses libnotify/DBus. It usually works if the environment has a notification daemon (most do). If not, nothing happens.
+- **Tray icons:** Many Linux DEs have limitations (some require you to use a specific icon size or they might not show unless an appindicator is used). There are quirks with Ubuntu's AppIndicator vs legacy tray. Solutions exist but may require additional modules. Test tray functionality on target DEs if you use it.
+- **Deployment:** Perhaps easiest is an AppImage (one file that runs on most distros). Or provide deb and rpm for Ubuntu/Fedora. Snap is an option but users have mixed feelings. Because auto-update isn't built-in on Linux, you might rely on the user's package manager or just notify the user to download a new version. If using AppImage, there's AppImageUpdate tool for delta updates, but that's separate from Electron's system.
+- **UI theme:** Linux has many themes. If your app uses native dialogs, they might look different per environment. It's usually fine. Ensure high-DPI icons assets are provided for Linux as well.
+- **Testing**: Because of fragmentation, test at least on a popular distro like Ubuntu and one like Manjaro or Fedora to see differences. 
+
+## Cross-Platform Code
+
+To minimize platform-specific issues:
+- Use Node's cross-platform APIs (`path`, `os.homedir()`, etc.) rather than building file paths by string.
+- When storing file paths in config, consider normalizing them or storing them per platform. E.g., on Windows "C:\path\to\file", on Mac "/path/to/file". If your config is shared (like synced via cloud), be mindful it might not make sense on another OS.
+- If you have platform-specific code (like Mac-only AppleScript integration or Windows-only registry access), isolate it and guard it with checks (`process.platform` which returns 'darwin', 'win32', 'linux', etc.). Nx can also allow conditional imports via file naming (like `.win.ts` extensions if needed).
+- Ensure your build system can produce builds for all three. Nx-electron with electron-builder typically can build cross-platform if run on each platform (you can also do cross-build: on Mac you can build Win if you have Wine and some tools, but easier is to just build on a Windows machine or use CI for that).
+- Differences in environment: Mac and Linux are Unix-like, Windows not. So test path, newline, encoding differences as mentioned. Also test non-ASCII file names (Unicode) and spaces in file paths on each platform – those sometimes reveal quoting issues or encoding problems if any.
+
+**Platform-specific UI adjustments:**
+- On Mac, you might implement a Preferences window triggered by the app menu. On Windows/Linux, there's no app menu "Preferences" by default, so maybe have it under an "Edit" or "Tools" menu or a gear icon.
+- On Windows, common shortcut for settings is usually under maybe an "File -> Settings". So adapt menu text accordingly (maybe label it "Preferences" on Mac, "Settings" on Win).
+- Titles and phrasing: Mac apps often use sentence case, Windows sometimes title case in menus – minor detail. Consistency is more important than following each guideline pedantically, but if you can, tailor the experience.
+
+**System integration differences:**
+- **Opening files with the app**: On Mac, you register file types in Info.plist via electron-builder config (`fileAssociations`). On Windows, similar via registry entries in installer. If your app should handle certain file types (like .xyz files), set those up so double-clicking such file opens your app and you get the file path in `app.on('open-file')` (Mac) or process args (Windows).
+- **URL Protocols**: If you want a custom URL like `myapp://open?file=...`, register it in electron-builder under protocols. Mac triggers `app.on('open-url')`, Windows gives it as arg.
+- **Various OS-specific features**: e.g., Windows has a system tray where apps often reside for quick access (especially if the app runs in background). Mac has menu bar extras (you can create a Tray icon which appears in the top bar). If you plan a background service, you might implement a Tray icon on both (on Mac it appears top, on Win in bottom right system tray). On Mac, users are used to menu bar apps for certain things; on Windows, the system tray is common. Code wise, Electron's Tray works on all, just supply different icon assets per platform.
+
+In summary, design your app core to be platform-agnostic, but polish the edges for each OS’s norms. Mac-first development means you'll likely have a solid, polished Mac app – then plan time to test and adjust for Windows (which often has the most differences) and Linux (which can be straightforward if you avoid assumptions).
+
+Now, to conclude, let's outline an **implementation roadmap** – a phased plan to execute this migration and development as a solo developer, including risk mitigation, testing, and tools.
+
+# Implementation Roadmap
+
+Migrating and expanding this application is a significant project. Breaking it into **phases** will help manage complexity and reduce risk. Below is a suggested roadmap with a phased approach, along with risk management tips, self-review milestones, and tooling recommendations for debugging, testing, and performance monitoring at each step.
+
+## Phase 1: Set Up Nx Monorepo and Verify Web App
+
+**Goal:** Establish the Nx monorepo structure with the Next.js app running inside it exactly as before.
+
+- **Step 1.1:** Initialize Nx workspace (if not done already). Install Nx and required plugins (@nx/next).
+- **Step 1.2:** Generate or add the Next.js app to `apps/web`. Move code into place as described in the Nx Monorepo Setup section. Keep git history if possible (using `nx import` or manually moving .git folder into new structure) ([Import an Existing Project into an Nx Workspace | Nx](https://nx.dev/recipes/adopting-nx/import-project#:~:text=The%20)).
+- **Step 1.3:** Set up shared libraries and move code. Initially, you might not refactor everything; just ensure basic separation (maybe move a couple of obvious utils to libs). The priority is not to break functionality.
+- **Step 1.4:** Run `nx serve web` and open the app in the browser. It should behave the same as the original. Run unit tests (if any) to confirm nothing broke.
+- **Validation:** At this stage, you have **zero regression** in the web version. Commit this state ("Migrated Next.js app into Nx monorepo"). This is a baseline you can always return to if needed.
+
+*Risk mitigation:* Do not proceed to adding Electron until the web app is stable in Nx. Use source control to track all changes. If something fails, you can compare with the original single-app repository. Also, update your README/documentation with new dev commands (like using Nx instead of `next dev`).
+
+## Phase 2: Introduce Electron App (Proof of Concept)
+
+**Goal:** Have a basic Electron app running in the monorepo, able to open a window and display content from the Next.js app (even if just a placeholder).
+
+- **Step 2.1:** Add the Electron application to Nx. Use `nx-electron:app` to generate `apps/desktop` bound to `web` ([nx-electron/README.md at master · bennymeg/nx-electron · GitHub](https://github.com/bennymeg/nx-electron/blob/master/README.md#:~:text=Creating%20Nx%20Electron%20Application)). This sets up build configs. If not using nx-electron, set up a manual `apps/desktop` with a `main.ts` and a minimal `package.json` (though Nx likely uses the root package.json).
+- **Step 2.2:** Implement a simple `createWindow` in main that loads a local HTML or the Next dev server. For initial POC, you can create a static `index.html` in `apps/desktop` saying "Electron App Works" to test Electron launch, independent of Next.
+- **Step 2.3:** Add an Nx task or NPM script to launch the Electron app in dev. With nx-electron, `nx serve desktop` likely will build the main process and start Electron. If manual, you might use `concurrently "nx serve web" "wait-on http://localhost:4200 && electron apps/desktop/main.js"`. The `wait-on` ensures electron starts after the Next dev server is ready.
+- **Step 2.4:** Run the combined dev environment. You should see the Electron window open and, if pointing to Next dev URL, load the Next app. If pointing to a static file, you'll just see that. The key is verifying Electron can launch from Nx. Check the console for any errors (like missing files or wrong paths).
+- **Validation:** You now have two apps: the Next web still accessible in browser, and an Electron app showing either static content or the Next content. Confirm window opens, correct dimensions, etc. At this point, the Electron app might not be doing anything useful yet, but the skeleton is there.
+
+*Risk mitigation:* Keep this Electron app very simple initially. The idea is to ensure the build and run process works. If nx-electron plugin is used, note any issues or needed config changes (for instance, adjust `baseHref` if needed as per their note ([nx-electron/README.md at master · bennymeg/nx-electron · GitHub](https://github.com/bennymeg/nx-electron/blob/master/README.md#:~:text=command))). Document how to run the electron app for your own reference (as commands differ from pure Next).
+
+## Phase 3: Integrate Next.js UI with Electron
+
+**Goal:** Get the Electron app to actually display the Next.js interface and handle basic routing.
+
+- **Step 3.1:** Decide on dev vs prod loading. For dev, easiest is to load `http://localhost:4200` (Next dev server). Implement that in `main.ts` when `process.env.NODE_ENV === 'development'`. For production, for now, you can also load the same (meaning you would have to run a local server in prod which isn't ideal but as a stepping stone, it's okay to test).
+- **Step 3.2:** Test the Electron app loading the Next dev server. Run `nx serve web` and in another terminal `nx serve desktop` (or the combined command). The Electron window should show your Next.js app exactly as in the browser. Navigate around in the Electron window to ensure routing works (it should).
+- **Step 3.3:** Implement a production build approach. For now, perhaps use `nx build web` and then serve the output. You have a few options:
+   - Simplest: after building Next, start a Next server (`next start`). This can be done by calling `require('next')` in the main process on app ready, or by spawning a process. Or run an Express with `app.prepare()` as in the Stackademic article ([Learn how to build a desktop application with Electron and Next.js while also adding API route capabilities. | by Faizk | Stackademic](https://blog.stackademic.com/learn-how-to-build-a-desktop-application-with-electron-and-nextjs-while-also-adding-api-route-ebaf37b0511b#:~:text=,etc%20%E2%80%94%20and%20access%20localhost%3A3000)).
+   - Alternative: do `next export`. If your app can be exported (no dynamic SSR needed), run `nx run web:export` to get static files, and then use `loadFile` in Electron.
+   For this phase, it's okay to choose a quick solution (even if it's running a server on localhost:3000). The focus is verifying that in a packaged scenario, the pieces connect.
+- **Step 3.4:** Package the app to test production once. Use `nx run desktop:package` (if using nx-electron) or manually run electron-builder. This will create a distributable (e.g., a DMG/zip for Mac). Install/run that to see if the Electron app launches and shows the Next content in a production environment. This step will help identify any file path issues in production (common ones: Next static files not found if not properly bundled).
+- **Validation:** In dev mode, the Electron app is basically your Next app in a desktop window. In a prod build, the Electron app loads some form of the Next app (via static files or internal server). If you can open your packaged app and see your Next UI, congratulations—the core migration is successful. Now the "Web vs Desktop" difference is mostly in capabilities.
+
+*Risk mitigation:* This is a complex step. If production build doesn't work initially, don't panic:
+   - Check the console log or devtools (you can open devtools in Electron with `mainWindow.webContents.openDevTools({ mode: 'detach' })` in dev).
+   - Common issues: paths in Next config (maybe you need `assetPrefix` or `basePath` if serving from file://), or missing environment variables.
+   - As a fallback, you can keep using a local server in production mode for now, and refine later. For instance, package the app but have it run an express server on launch as the Stackademic approach did ([Learn how to build a desktop application with Electron and Next.js while also adding API route capabilities. | by Faizk | Stackademic](https://blog.stackademic.com/learn-how-to-build-a-desktop-application-with-electron-and-nextjs-while-also-adding-api-route-ebaf37b0511b#:~:text=,platform%20%21%3D%3D%20%27darwin%27%29)). It's heavy but ensures the Next app is served correctly. Optimize it in a later iteration (like moving to static files if feasible).
+
+By end of Phase 3, you essentially have a working Electron app equivalent to the web app. The next phases will focus on adding **desktop-specific enhancements** (file system, state, offline, etc.) in incremental steps.
+
+## Phase 4: Implement Desktop-Specific Features (File System integration)
+
+**Goal:** Migrate features that benefit from Electron (file system access, etc.) into the desktop app without breaking the web app.
+
+- **Step 4.1:** **Preload and IPC Setup.** Write a `preload.js` script and adjust `main.ts` to use it (`contextIsolation: true`, `nodeIntegration: false`). Start by exposing a trivial API to test, e.g. expose a function `version()` that returns `app.getVersion()` from main. From the Next app (renderer), try calling it via `window.electronAPI.version()` and display it. This confirms your preload->ipc->main pipeline works.
+- **Step 4.2:** **Directory selection.** Implement the "Open Directory" flow: In renderer (could be a button "Open Folder"), call `window.electronAPI.selectDirectory()`. In preload, that triggers `ipcRenderer.invoke('dialog:openDir')`. In main, handle `'dialog:openDir'` to show the dialog and return the chosen path ([javascript - How to use preload.js properly in Electron - Stack Overflow](https://stackoverflow.com/questions/57807459/how-to-use-preload-js-properly-in-electron#:~:text=%2F%2F%20Expose%20protected%20methods%20that,ipcRenderer.send%28channel%2C%20data)) ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=const%20electronHandler%20%3D%20,%2F%2F%20...others%20code)). Then in renderer, get the path and perhaps store it in Zustand state.
+   - Ensure this is only in desktop context: you may wrap the button or feature to only show if `window.electron` exists, so web users don’t see a broken button.
+- **Step 4.3:** **File listing and state management integration.** Once a directory is selected, use `fs` in main (or even directly in preload since it has Node access) to list files. But better: have a function `electronAPI.readDir(path)` that calls main via `ipcRenderer.invoke('fs:readDir', path)`. Main does `fs.readdir` and returns list of entries. Then update Zustand store with that list.
+   - Alternatively, more elegantly, incorporate this into libs/state: e.g., add an action `loadDirectory(path)` in your Zustand store. If in Electron, that action calls `window.electron.fs.readDir` (from preload) and then sets state. If on web, that action might use the browser File System API (so your libs/state could have environment-specific implementation).
+   - Test with a folder containing some files: see if the UI lists them.
+- **Step 4.4:** **File operations (if needed).** If your app allows creating or deleting files/folders, implement those similarly through IPC (`fs:delete`, `fs:create`, etc.). Ensure to update state accordingly on success.
+- **Step 4.5:** **File watchers.** Integrate chokidar to watch the opened directory. When events fire, send IPC messages (`fs:added`, etc.). In preload, forward those to renderer, and update the Zustand store.
+   - Test by adding a file to the folder outside the app (e.g., in Finder/Explorer) and see if the app updates in near-real-time. This is a big win over web.
+- **Validation:** At this stage, your Electron app should handle directory browsing natively and more efficiently than the web app. The web app might still have its old implementation (maybe using File System Access API). Ensure the web app still compiles and runs (perhaps hide these new features on web or provide a fallback). Confirm performance: try a large folder, the app should remain responsive due to asynchronous ops and virtualization (if list is huge, ensure you're not rendering all at once).
+- **Commit and Document:** Note any new dependencies (e.g., added `electron-store` or `chokidar`). Also note usage: "In desktop, you can open a folder and see contents."
+
+*Risk mitigation:* 
+   - **Isolation:** Keep changes that are purely for desktop guarded by `if (window.electron)` or similar, so the web version isn’t affected. 
+   - **Testing:** Test file operations on actual file system carefully to avoid data loss. In early dev, maybe work on a sample directory, not your real documents, to be safe.
+   - **Backup Plan:** The web version's file handling (if it exists) can remain as a fallback for web. For desktop, now using Node fs. If something is not ready in Electron, the web approach could still be used by loading the web's UI in the electron app as a fallback (less needed now that we replaced it).
+
+## Phase 5: State Persistence and Offline Support
+
+**Goal:** Introduce `electron-store` to persist app state (like last opened folder, user settings, etc.) and ensure offline usage doesn't lose data.
+
+- **Step 5.1:** **Integrate electron-store.** Install it and set up in main (e.g., create a `Store` instance). Expose needed methods via IPC. Or, as planned, use Zustand's persistence middleware with a custom storage that uses `window.electron.store` calls ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=Even%20though%20we%20can%20configure,it%20via%20Electron%27s%20preload%20script)) ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=const%20electronHandler%20%3D%20,store%22%2C%20property%2C%20val%29%3B%20%7D%2C)).
+   - Implement that custom storage bridging as in Hybrid State Management section. E.g., in libs/state, when creating the store, detect environment and plug in storage drivers.
+- **Step 5.2:** **Test persistence.** For example, track last opened directory in state and persist it. Quit the Electron app and reopen it. The previously opened directory should be restored (you can have the app auto-open it on launch by reading from store in main or as soon as renderer loads, dispatch an action to load that path).
+   - Also test that in web, it still uses localStorage for persistence (maybe open in browser, set some value, refresh page to see it persists).
+- **Step 5.3:** **Offline mode scenarios.** Simulate being offline for any cloud-related parts:
+   - If your app doesn't use network at all (pure local file manager?), then offline doesn't change functionality. But maybe you plan to integrate some cloud sync later. If currently nothing to fetch, you're good.
+   - If there are server interactions (e.g., license check, update check, or some API usage), ensure the app doesn't hang when offline. Handle errors gracefully.
+   - Possibly implement a "You are offline" indicator if relevant.
+   - Make sure any data needed at startup is cached. For example, if your app needs a list of something from the web and you want offline, cache it first. 
+   - If nothing like that, just mark this done conceptually: the app is fully local-friendly now.
+- **Step 5.4:** **Auto-sync on connection.** If you do have offline changes to sync (this might be more applicable if you add a cloud feature or multi-device sync), implement a background check when connection regained. For now, perhaps log "Back online" event (you can simulate by turning off Wi-Fi and on, watch `window.navigator.onLine` events).
+- **Validation:** Data like user preferences or app state should survive app restarts and be stored in a file on disk (open `config.json` to verify content ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=Since%20Electron%20doesn%27t%20have%20a,app.getPath%28%27userData))). The app should run and be usable without internet. If you disconnect and reconnect internet, nothing should break (maybe logs show attempts to check updates etc, which is fine).
+- **Commit:** Mark the app as supporting offline-first usage with persistent state.
+
+*Risk mitigation:* 
+   - Ensure electron-store file is not corrupted: electron-store is pretty stable, but if you do heavy writes, there's a slight risk. You may implement try/catch around store operations and maybe backup the file occasionally (rare scenario).
+   - Provide a way to "reset" state if needed (like a debug option to clear store, in case user data gets weird; not for users necessarily, but for you in dev).
+   - Continue to separate web vs electron logic for persistence: e.g., don't try to call `window.electron.store` on web (guard it). 
+   - This phase doesn't affect web much, except that you introduced persist middleware which on web uses localStorage – make sure appropriate polyfills or checks exist if SSR etc. Nx/Next SSR might not have window, so conditionally apply persist only in client-side or use `typeof window` guard around `persist` usage.
+
+## Phase 6: Implement Auto-Update Mechanism
+
+**Goal:** Set up auto-update pipeline so the Electron app can update itself (macOS first).
+
+- **Step 6.1:** **Configure electron-builder for publishing.** Decide on a publish method (GitHub, etc.). In your `apps/desktop/project.json` or `electron-builder.json`, add a publish config. For example, if using GitHub, ensure you have repository info and a token in env for CI.
+- **Step 6.2:** **Add autoUpdater code.** In `main.ts`, after app is ready (or after some delay), initialize `autoUpdater`. For development, guard it (`if (isDev) autoUpdater.autoDownload = false` or simply don't check updates in dev).
+   - Use `autoUpdater.checkForUpdatesAndNotify()` for simplicity ([Auto Update - electron-builder](https://www.electron.build/auto-update.html#:~:text=Auto%20updates%20are%20enabled%20by,CI%20environment%20for%20automated%20deployments)). This will show a notification when downloaded. Alternatively, listen to events and show custom dialog.
+   - Hook up logging: `autoUpdater.on('error', err => console.error(err))` for dev debugging.
+- **Step 6.3:** **Test locally (optional).** Testing autoUpdater thoroughly requires making a pretend update. One approach: Use a second version number, pack the app, and set up a local static server with the update files. Point autoUpdater to it by overriding `autoUpdater.setFeedURL({ url: 'http://localhost:....' })`. This can be complex, so many skip directly to real testing via a prerelease.
+- **Step 6.4:** **Release a test update.** Perhaps do an initial release v0.1.0, then a v0.1.1 with a minor change (like change the version displayed by that `window.electronAPI.version()` from earlier). Publish both to a GitHub draft release (or actual release in a test repo). Download v0.1.0, run it, see if it finds v0.1.1. If it works, you'll see logs and eventually the app will update.
+- **Polish the UX:** If you prefer to control when restart happens, use `autoUpdater.on('update-downloaded', ...)` to prompt user: e.g., use a dialog in renderer or a modal "Update downloaded, restart now?" linking to an IPC that calls `autoUpdater.quitAndInstall()`.
+- **Validation:** This is a bit tough to validate fully manually. Once you have some confidence (through either logs or a quick run of a published update), you can consider it working. The main validation: the autoUpdater does not cause errors when no update is available (so normal usage isn't impacted), and when a new version is out, your testing indicates it will be downloaded and installed. You may have to fully test this when you do your first actual user update.
+- **Commit/Tag:** Have a step in your CI or release script to handle publishing. Document in project notes how to publish a new version (commands to run Nx build, etc., then uploading artifacts or relying on GitHub Actions to do it).
+
+*Risk mitigation:*
+   - Code signing keys: Securely store them (especially Windows code cert or Apple Developer credentials). For a solo dev, maybe do it manually first to reduce complexity, then automate.
+   - On first deployment to users, monitor if updates succeed. Have a fallback plan: if auto-update fails for some reason (maybe mis-configured), you might need to prompt users to manually download next version. So maybe announce new versions in an in-app message as well.
+   - For Mac, ensure app is signed and notarized, or else auto-update might download but macOS will block the new version from launching. So test notarization process before releasing widely.
+
+## Phase 7: Cross-Platform Testing and Refinement
+
+**Goal:** After the app is solid on macOS, test on Windows and Linux to prepare for broader release.
+
+- **Step 7.1:** Set up a Windows environment (could be a VM or a separate machine). Build the app for Windows (if on Mac, you might use a CI or cross-compile with Wine, but best results are building on Windows itself).
+- **Step 7.2:** Install and run on Windows. Test all functionality: opening directories (uses Windows dialogs, should work), listing files (any path issues?), watchers (are changes detected), notifications (maybe try sending a test Notification), menu shortcuts (Ctrl+ shortcuts instead of Cmd). Adjust code if needed (like add a conditional for using `Ctrl` on Win in a shortcut).
+- **Step 7.3:** Test auto-update on Windows. Electron-updater on Windows will likely just work if GitHub is set, but ensure your build produced a `latest.yml` and the installer exe is published. Possibly try an update the same way you did on Mac.
+- **Step 7.4:** Linux testing (Ubuntu for instance). Build a Linux package (AppImage or deb). Run it, test basics. If watchers or certain modules fail (sometimes chokidar may need an additional library on some distros), note that. Many issues on Linux revolve around missing system dependencies (e.g., if you needed a system library for a Node native module). Pure Node stuff like fs, chokidar should be fine.
+- **Fix platform-specific issues:** For example, if path separators cause a bug in your path handling, fix by using Node's `path` everywhere. Or if electron-store's default save path is different, ensure it's fine. Also adjust any UI labels ("Preferences" vs "Settings") by checking `process.platform`.
+- **User Experience differences:** Possibly adjust small things:
+   - On Windows, add a "Check for Updates" item in Help menu (common in Win apps).
+   - On Linux, maybe use the system theme for icons (some Electron apps allow selecting an icon theme).
+   - These are minor, do if time permits.
+- **Validation:** All major features work on all 3 OS. The app can be considered truly cross-platform. You might not release Linux immediately if your user base is small there, but having it working means no surprises later.
+
+*Risk mitigation:* 
+   - Use community resources: if you encounter a Windows-specific error, search if known in Nx or Electron forums (some issues like long paths or needed Windows build tools).
+   - Keep Windows changes isolated – e.g., maybe you'll need a registry read for something on Windows, guard it so it doesn't run on Mac.
+   - For Linux, test on at least one distro but realize you cannot test them all. Rely on Electron's broad compatibility. Provide AppImage for general usage which often just works on many distros.
+   - Since you're solo, you might decide to release Mac first, then follow with Win after additional testing. That's fine; just keep track of what to address for Win/Linux.
+
+## Ongoing: Monitoring, Testing, and Quality Assurance
+
+While not a phase with a concrete deliverable, continuously employ **debugging and testing tools**:
+- **Debugging Tools:** Use Chrome DevTools in Electron (both for renderer and you can use the console for main via `electron --inspect`). Also consider the **Vue/React/Redux DevTools** extensions: you can load the React DevTools extension into Electron to inspect component state. Nx Console (VSCode plugin) can help run tasks visually.
+- **Logging:** Implement a logging system (even simple `console.log`) for key events (like when IPC messages are sent/received, when updates happen). In production, consider using a library like `electron-log` to record to file so you can ask users for logs if issues.
+- **Testing Strategy:** 
+   - **Unit tests:** Continue writing them for pure functions in libs (Nx helps with running them quickly).
+   - **Integration tests:** For Electron, you can use a framework like **Spectron** or **Playwright** with Electron support ([Automated Testing | Electron](https://electronjs.org/es/docs/latest/tutorial/automated-testing#:~:text=Automated%20Testing%20,js%20API)) ([Playwright: Fast and reliable end-to-end testing for modern web apps](https://playwright.dev/#:~:text=apps%20playwright,locally%20or%20on%20CI%2C)) to automate launching the app and clicking around. This can be complex to set up, so perhaps target critical flows if you choose to automate. At least, manual integration testing (pretending to be a user doing tasks) is vital.
+   - **E2E on web:** If the web version remains a target, use something like Cypress to test that it's still working (especially if it shares libs, to catch if a refactor broke web).
+- **Performance Monitoring:** Use Chrome Performance profiler on the renderer to check render times if UI is sluggish. Use Node’s profiling (or just measure times) in main for heavy operations (like scanning a dir of X files took Y ms, optimize if needed). Monitor memory usage of the app (Activity Monitor on Mac, Task Manager on Windows). If you see it climbing with certain actions, investigate potential leaks (maybe unsubscribed listeners, etc.). 
+   - For example, if you open and close 10 directories and memory keeps increasing, maybe you're keeping watchers open – ensure to `.close()` watchers when not needed.
+   - Use the recommendations from Electron’s performance checklist if needed (like bundling code to reduce overhead, lazy-load modules, etc.) ([Performance | Electron](https://electronjs.org/docs/latest/tutorial/performance#:~:text=Time%20and%20time%20again%2C%20we,reliable%20strategy%20to%20improve%20performance)).
+- **Self-Review:** As a solo dev, periodically step back and **review your own code**:
+   - Before a release, do a walkthrough: go through each feature and think "what could go wrong here?" and test those edge cases.
+   - Use tools like ESLint and TypeScript to catch mistakes (Nx sets a lot of this up). They can catch issues like calling an Electron-only function on web, etc.
+   - Consider writing a set of **use-case scenarios** (like a mini test plan) and tick them off on each platform.
+- **User Feedback and Crash Reporting:** Once you have users, integrate something like **Sentry** for Electron (it can catch renderer and main errors) or set up crash logs. At minimum, log unhandled rejections or exceptions to a file so you can troubleshoot issues reported by users.
+   - This isn't needed before initial release but is good to plan for maintenance.
+
+**Risk Management Recap:**
+- Use version control religiously. Each phase or major feature, commit it. Use branches if doing experimental changes.
+- If something goes wrong, you have stable points to revert to (like the state after Phase 3 was working well if Phase 4 introduction breaks something unexpected).
+- Keep the web app intact as a reference for how things should behave. This is helpful to differentiate "is it a logic bug or an Electron-specific bug?"
+- Manage scope: stick to the plan. It's easy to get carried away adding new features during migration (since "now we can do X because we have Electron"). Resist adding too many at once; complete the migration and core stability first, then iteratively add new enhancements.
+
+Finally, maintain a **checklist** of key tasks and test scenarios for final review:
+- Did we enforce security best practices (nodeIntegration off etc.)? Yes, checked in Electron console for any security warnings (Electron prints warnings if certain flags are insecure).
+- Is performance acceptable on typical scenarios (open medium folder, update UI quickly)? Yes/no, adjust as needed.
+- Are all critical data persisted to avoid user frustration? (If app update or crash, do they lose anything important? If not persisted, consider persisting it.)
+- Are platform-specific menu items correct? (E.g., on Mac, the Quit is under app menu, on Win it's under File maybe with Ctrl+Q if you choose.)
+- Did we handle closing the app properly (on Mac, clicking red X closes window but app stays open unless explicit, etc.)? Possibly implement `window-all-closed` to quit on Win/Linux and not on Mac, which we did ([Learn how to build a desktop application with Electron and Next.js while also adding API route capabilities. | by Faizk | Stackademic](https://blog.stackademic.com/learn-how-to-build-a-desktop-application-with-electron-and-nextjs-while-also-adding-api-route-ebaf37b0511b#:~:text=createWindow%28%29%20%7D%29%20app.on%28%27window,app.quit%28%29%20%7D)).
+
+By following this structured plan, you mitigate risk and ensure at each stage you have a working product. This makes the daunting migration manageable. Each phase can be a milestone:
+1. Nx monorepo running (web intact).
+2. Basic Electron scaffolding.
+3. Electron showing Next UI (foundation done).
+4. Electron-specific improvements (file system).
+5. Offline and persistence solidified.
+6. Updater in place for continuous delivery.
+7. Multi-platform polish.
+
+Throughout, keep notes (even in code comments or a dev log) about decisions made (e.g., "Using method X for update because Y", etc.). This documentation helps future maintenance and if you ever onboard someone else or just revisit the project after a break.
+
+When all phases are complete, you'll have a **definitive migrated application**: a Next.js 15 App Router app, running within an Nx monorepo, packaged as a cross-platform Electron desktop app with native file system performance, offline capability, and auto-updating, while still optionally runnable as a web app if needed. 
+
+This concludes the detailed migration plan. You now have a clear guide to execute and reference throughout the process, complete with best practices, rationale, and pointers to further resources for each aspect of the project. Good luck with your migration! 
+
+**Sources:**
+
+- Nx Monorepo structuring and library guidelines ([Nx Architecture Part-1: Organizing and Structuring a React Project with Nx](https://www.qovery.com/blog/nx-architecture-part-1-organizing-and-structuring-a-react-project-with-nx/#:~:text=The%2080%2F20%20rule%3A%20Note%20that,apps%2C%20following%20an%2080%2F20%20approach)) ([Folder Structure | Nx](https://nx.dev/concepts/decisions/folder-structure#:~:text=common%20problem))  
+- Nx import and migration steps ([Import an Existing Project into an Nx Workspace | Nx](https://nx.dev/recipes/adopting-nx/import-project#:~:text=The%20))  
+- Electron preload and security best practices ([javascript - How to use preload.js properly in Electron - Stack Overflow](https://stackoverflow.com/questions/57807459/how-to-use-preload-js-properly-in-electron#:~:text=The%20proper%20way%20to%20use,require)) ([Security | Electron](https://electronjs.org/docs/latest/tutorial/security#:~:text=1,e))  
+- Zustand persistence and Electron store integration ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=Even%20though%20we%20can%20configure,it%20via%20Electron%27s%20preload%20script)) ([Creating a synchronized store between main and renderer process in Electron - BigBinary Blog](https://www.bigbinary.com/blog/sync-store-main-renderer-electron#:~:text=const%20electronHandler%20%3D%20,store%22%2C%20property%2C%20val%29%3B%20%7D%2C))  
+- Electron file system vs Browser FS Access ([javascript - Browser-side JS: File System API vs File System Access API? - Stack Overflow](https://stackoverflow.com/questions/67344909/browser-side-js-file-system-api-vs-file-system-access-api#:~:text=,US%2Fdocs%2FWeb%2FAPI%2FFile_System_Access_API))  
+- Electron auto-update configuration (electron-builder) ([Auto Update - electron-builder](https://www.electron.build/auto-update.html#:~:text=macOS%20application%20must%20be%20signed,for%20auto%20updating%20to%20work))

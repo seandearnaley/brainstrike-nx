@@ -1,0 +1,47 @@
+---
+description: Nx Monorepo Best Practices and Conventions
+globs: 
+---
+# Nx Monorepo Guidelines
+
+These guidelines ensure consistent structure and maintainability for projects using Nx. They emphasize best practices for organizing multiple applications and libraries under a single repository.
+
+## 1. Workspace Structure
+- **Apps Folder**
+  - Place deployable applications (e.g., Next.js, Electron) under `apps/`.
+  - Keep each application self-contained, with a separate `project.json`.
+- **Libs Folder**
+  - Put shared code (e.g., utilities, UI components, domain logic) in `libs/`.
+  - Create logical groupings by domain or feature. For example, `libs/shared/ui`, `libs/core/models`.
+
+## 2. Dependency Management
+- **Single Version Policy**
+  - Keep a single root `package.json` to avoid version mismatches.
+  - Use Nx to manage all dependencies; `nx graph` helps visualize project dependencies.
+- **Module Boundaries**
+  - Enforce domain boundaries with Nx ESLint or Biome rules.
+  - Tag libraries appropriately (e.g. `scope:shared`, `scope:electron`) to restrict unauthorized imports.
+
+## 3. Build & Serve Targets
+- **Consistent Commands**
+  - Define `build`, `serve`, `test`, and `lint` targets in each project’s `project.json`.
+  - Use Nx commands (`nx serve <app>`) to run local dev servers.
+- **Affected Commands**
+  - Use `nx affected:build` and `nx affected:test` to build/test only changed code. This speeds up CI/CD.
+
+## 4. Code Quality & Formatting
+- **Linting & Formatting**
+  - Standardize ESLint and Prettier or Biome across all projects.
+  - Use Nx to run checks: `nx format:check --all`.
+- **CI Integration**
+  - Integrate Nx checks in continuous integration (e.g. `nx affected:lint`, `nx affected:test`) to catch issues early.
+
+## 5. Workspace Consistency
+- **Tagging & Boundaries**
+  - Tag libraries to limit cross-imports and maintain a clean architecture.
+  - Configure `implicitDependencies` if certain libs must always be rebuilt together.
+- **Documentation**
+  - Keep README or usage notes in each library.
+  - Add references to relevant local docs with `@file ../docs/<filename>.md` if needed.
+
+Adhering to these Nx monorepo conventions ensures a well-structured, scalable, and maintainable repository for multiple apps and shared libraries.

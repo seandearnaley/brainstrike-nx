@@ -1,0 +1,173 @@
+---
+description: Biome Configuration Guidelines for Nx and Electron
+globs: **/biome.json
+---
+# Biome Configuration Guidelines
+
+These guidelines detail best practices for using Biome in Nx monorepos with Electron applications, focusing on performance, consistency, and security.
+
+## 1. Root Configuration
+- **Base Setup**
+  ```json
+  {
+    "$schema": "https://biomejs.dev/schemas/1.5.3/schema.json",
+    "organizeImports": {
+      "enabled": true
+    },
+    "formatter": {
+      "enabled": true,
+      "formatWithErrors": false,
+      "indentStyle": "space",
+      "indentWidth": 2,
+      "lineWidth": 100
+    }
+  }
+  ```
+
+## 2. Electron-specific Rules
+- **Main Process**
+  ```json
+  {
+    "linter": {
+      "rules": {
+        "recommended": true,
+        "correctness": {
+          "noUndeclaredVariables": "error",
+          "noUnusedVariables": "error"
+        },
+        "security": {
+          "noDangerouslySetInnerHtml": "error",
+          "noGlobalEval": "error"
+        },
+        "nursery": {
+          "noNodejsModules": ["error", { "allow": ["electron", "path", "fs"] }],
+          "noRestrictedGlobals": "error"
+        }
+      }
+    }
+  }
+  ```
+
+- **Renderer Process**
+  ```json
+  {
+    "linter": {
+      "rules": {
+        "recommended": true,
+        "security": {
+          "noDangerouslySetInnerHtml": "error",
+          "noGlobalEval": "error"
+        },
+        "nursery": {
+          "noNodejsModules": "error",
+          "noRestrictedGlobals": ["error", {
+            "globals": ["require", "process", "__dirname", "__filename"]
+          }]
+        }
+      }
+    }
+  }
+  ```
+
+## 3. Project-specific Overrides
+- **Override Configuration**
+  ```json
+  {
+    "overrides": [
+      {
+        "include": ["apps/electron-app/src/main/**/*.{ts,js,tsx,jsx}"],
+        "linter": {
+          "rules": {
+            "nursery": {
+              "noNodejsModules": ["error", { "allow": ["electron"] }]
+            }
+          }
+        }
+      },
+      {
+        "include": ["apps/electron-app/src/renderer/**/*.{ts,js,tsx,jsx}"],
+        "linter": {
+          "rules": {
+            "nursery": {
+              "noNodejsModules": "error"
+            }
+          }
+        }
+      }
+    ]
+  }
+  ```
+
+## 4. Integration with Nx
+- **Project Configuration**
+  ```json
+  {
+    "targets": {
+      "lint": {
+        "executor": "nx:run-commands",
+        "options": {
+          "command": "biome check apps/electron-app/src"
+        }
+      },
+      "format": {
+        "executor": "nx:run-commands",
+        "options": {
+          "command": "biome format --write apps/electron-app/src"
+        }
+      }
+    }
+  }
+  ```
+
+## 5. VSCode Integration
+- **Settings**
+  ```json
+  {
+    "editor.defaultFormatter": "biomejs.biome",
+    "editor.formatOnSave": true,
+    "[typescript]": {
+      "editor.defaultFormatter": "biomejs.biome"
+    },
+    "[javascript]": {
+      "editor.defaultFormatter": "biomejs.biome"
+    }
+  }
+  ```
+
+## 6. CI/CD Integration
+- **GitHub Actions Example**
+  ```yaml
+  - name: Install dependencies
+    run: npm ci
+
+  - name: Lint and Format
+    run: |
+      npx nx affected --target=lint
+      npx biome ci .
+  ```
+
+## 7. Migration Guidelines
+- **From ESLint/Prettier**
+  1. Run `biome migrate` to convert existing configs
+  2. Review and adjust rules for Electron-specific needs
+  3. Update CI/CD pipelines to use Biome
+  4. Remove old ESLint/Prettier dependencies
+  5. Update VSCode settings
+
+## 8. Best Practices
+- **Performance**
+  - Use `biome check --apply` for combined lint and format
+  - Leverage Biome's parallel processing capabilities
+  - Configure `files.associations` in VSCode for optimal performance
+
+- **Security**
+  - Enable all security-related rules
+  - Use strict mode for IPC-related code
+  - Enforce type checking with TypeScript integration
+
+- **Maintenance**
+  - Keep Biome updated to latest stable version
+  - Document custom rules and their rationale
+  - Use `biome check --verbose` for detailed reports
+
+These guidelines ensure consistent code quality and security across your Nx monorepo with Electron applications while leveraging Biome's superior performance and modern features. 

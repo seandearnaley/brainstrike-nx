@@ -1,0 +1,49 @@
+---
+description: Electron IPC and Preload Scripting Best Practices
+globs: 
+---
+# Electron IPC & Preload Guidelines
+
+This file outlines how to safely structure inter-process communication (IPC) between the main and renderer processes, including secure preload usage.
+
+## 1. IPC Architecture
+- **Channel Separation:**
+  - Create distinct IPC channels for each domain (e.g., `dialog:open`, `fs:readDir`).
+  - Avoid using a single “catch-all” channel with massive switch statements.
+- **Async vs. Sync:**
+  - Prefer `ipcRenderer.invoke / ipcMain.handle` for async, promise-based communication.
+  - Limit synchronous methods (`sendSync`) to rare cases, as they block the UI.
+
+## 2. Preload Script
+- **Context Bridge:**
+  - Use `contextBridge.exposeInMainWorld` to create an `window.electron` or `window.api` object with specific methods.
+  - Hide `ipcRenderer` behind domain-specific functions like `openFolder()`, `readFile(path)`, etc.
+- **Secure Wrappers:**
+  - Validate arguments before sending them to main. Whitelist only safe operations.
+  - Never expose raw Node APIs (like `fs` or `require`) directly to the renderer.
+
+## 3. Validation & Data Sanitization
+- **Input Validation:**
+  - On the main side, check file paths, user inputs, or parameters to avoid insecure operations.
+  - If you pass user-generated data across IPC, sanitize or escape it to prevent injection attacks.
+- **Error Handling:**
+  - Use consistent patterns for returning errors (e.g., rejecting promises or sending error events).
+  - Ensure the renderer gracefully handles main-process exceptions and displays user-friendly messages.
+
+## 4. Broadcasting & Events
+- **Pub/Sub Model:**
+  - For events (like file changes), the main process can emit messages to all renderers via `webContents.send()`.
+  - Group them by channel, e.g. `mainWindow.webContents.send('fs:item-added', filePath)`.
+- **Subscription Management:**
+  - In the renderer, unsubscribe from events when the component unmounts.
+  - Avoid memory leaks in multi-window scenarios by cleaning up listeners.
+
+## 5. Testing & Debugging
+- **IPC Mocks:**
+  - In renderer tests, mock `window.electron` or `contextBridge` calls to isolate UI from main.
+  - In main tests, simulate `ipcMain.handle` calls with test stubs.
+- **Logging & DevTools:**
+  - Add logs on both sides (main & renderer) for IPC calls in dev mode.
+  - Use Electron’s built-in devTools or external logging libraries to debug IPC flow.
+
+By following these IPC and preload guidelines, you maintain a clean separation of concerns, reduce security risks, and keep your Electron codebase organized.
