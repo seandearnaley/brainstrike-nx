@@ -1,0 +1,132 @@
+---
+description: Commit Standards and Guidelines
+globs: 
+---
+
+
+This document outlines the commit message standards and git workflow practices for the Brainstrike-NX project.
+
+## Commit Message Format
+
+We follow the Conventional Commits specification with some customizations for our Nx monorepo:
+
+```
+type(scope?): subject
+
+[optional body]
+
+[optional footer(s)]
+```
+
+### Types
+
+The following types are enforced by commitlint:
+
+- `feat`: New features
+- `fix`: Bug fixes
+- `docs`: Documentation changes
+- `style`: Code style changes (formatting, missing semicolons, etc.)
+- `refactor`: Code changes that neither fix bugs nor add features
+- `perf`: Performance improvements
+- `test`: Adding or correcting tests
+- `build`: Changes affecting build system or external dependencies
+- `ci`: Changes to CI configuration files and scripts
+- `chore`: Other changes that don't modify src or test files
+- `revert`: Reverts a previous commit
+- `wip`: Work in progress (use sparingly)
+
+### Scope
+
+Scope is optional but recommended for clarity in our monorepo structure. Examples:
+
+- `feat(ui)`: UI-related feature
+- `fix(api)`: API-related fix
+- `docs(readme)`: README updates
+- `feat(electron)`: Electron-specific features
+
+### Subject Rules
+
+- Max length: 100 characters
+- Written in imperative mood ("add" not "added" or "adds")
+- First letter not capitalized
+- No period at the end
+- No upper-case, pascal-case, or camel-case
+
+### Body Rules
+
+- Optional but recommended for complex changes
+- Max line length: 200 characters
+- Should explain the motivation for the change
+- Can include breaking change notifications
+
+### Examples
+
+Good commits:
+```
+feat(dashboard): add user activity timeline
+fix(auth): resolve token refresh loop
+docs(api): update endpoint documentation
+refactor(core): simplify data processing pipeline
+```
+
+Breaking change example:
+```
+feat(api)!: change authentication endpoint response
+
+BREAKING CHANGE: Authentication response now includes refresh token.
+Previous implementations need to be updated.
+```
+
+### Configuration
+
+Our commit standards are enforced using commitlint and husky. Configuration files:
+
+- `commitlint.config.js`: Commit message rules
+- `.husky/commit-msg`: Git hook for commit validation
+
+### Best Practices
+
+1. **Atomic Commits**
+   - Each commit should represent one logical change
+   - Avoid mixing unrelated changes in a single commit
+
+2. **Work in Progress**
+   - Use `wip` type sparingly and only for temporary commits
+   - Squash WIP commits before merging
+
+3. **Breaking Changes**
+   - Always mark breaking changes with `!` and `BREAKING CHANGE:` footer
+   - Provide migration instructions in the commit body
+
+4. **Reverting Changes**
+   - Use `revert` type when reverting previous commits
+   - Include the original commit hash in the body
+
+5. **Monorepo Considerations**
+   - Use scopes to indicate which part of the monorepo is affected
+   - Consider impact on dependent packages
+
+### Git Hooks
+
+Husky is configured to run the following checks:
+- Commit message validation via commitlint
+
+### Troubleshooting
+
+If your commit is rejected:
+1. Check the error message from commitlint
+2. Ensure your commit follows the format rules
+3. Use `git commit --amend` to fix the last commit message
+
+### IDE Integration
+
+For VS Code users:
+- Install "Conventional Commits" extension for commit message templates
+- Use Cursor's commit rule awareness for inline guidance
+
+## Glob Pattern
+
+This rule applies to the following files:
+- `.husky/commit-msg`
+- `commitlint.config.js`
+- `**/package.json` 
