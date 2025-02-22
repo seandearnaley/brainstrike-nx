@@ -32,7 +32,7 @@ Guidelines for syncing application data and user settings across the main and re
 
 ## 4. Zustand or Other State Libraries
 - **Custom Storage Adapter:**
-  - If using Zustand’s `persist` middleware, create a custom storage adapter that calls main-process APIs (e.g., `getItem(key)`, `setItem(key, value)`).
+  - If using Zustand's `persist` middleware, create a custom storage adapter that calls main-process APIs (e.g., `getItem(key)`, `setItem(key, value)`).
   - Ensure it handles async operations gracefully.
 - **Conflict Resolution:**
   - If multiple windows or the main process can change the same data, define a merge strategy or last-write-wins approach.
@@ -47,3 +47,10 @@ Guidelines for syncing application data and user settings across the main and re
   - Provide fallback or default values if keys are missing.
 
 Adhering to these strategies ensures robust, consistent, and scalable state management within Electron, preventing data conflicts and performance bottlenecks.
+
+<!-- NEW SECTION: Enhanced State Synchronization & Secure IPC Channels -->
+## Enhanced State Synchronization & Secure IPC Channels
+- Ensure that any state changes in the main process are accurately and securely reflected in the renderer process.
+- Use sandboxing and strict validation on IPC channels that synchronize state to mitigate unauthorized mutations.
+- Adopt centralized or immutable state management patterns to reduce race conditions between processes.
+- Regularly audit state synchronization flows to enforce security and data integrity best practices.

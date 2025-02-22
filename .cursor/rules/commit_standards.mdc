@@ -130,3 +130,10 @@ This rule applies to the following files:
 - `.husky/commit-msg`
 - `commitlint.config.js`
 - `**/package.json` 
+
+<!-- NEW SECTION: Modern Commit Practices & CI/CD Integration -->
+## Modern Commit Practices & CI/CD Integration
+- Ensure each commit is atomic, addressing a single logical change.
+- Write clear, concise commit messages that reference relevant issue numbers.
+- Integrate commit linting and pre-commit hooks to maintain commit quality.
+- Leverage automated CI/CD pipelines that run tests and code linters on every commit. 

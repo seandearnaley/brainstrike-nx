@@ -9,7 +9,7 @@ This document focuses on best practices for the Electron renderer, particularly 
 ## 1. Node Integration & Context Isolation
 - **Node Integration Disabled:**
   - Assume no direct Node APIs in the renderer. Instead, use the secure APIs from `window.electron` or similar.
-  - If Node APIs are needed, rely on your preload script’s whitelisted methods.
+  - If Node APIs are needed, rely on your preload script's whitelisted methods.
 - **Context Isolation:**
   - Keep user code in the isolated renderer context.
   - Communicate with the main process through exposed functions or IPC channels.
@@ -43,5 +43,11 @@ This document focuses on best practices for the Electron renderer, particularly 
 - **Content Security Policy (CSP):**
   - Ensure any custom scripts or external resources are whitelisted in CSP.
   - Block inlined scripts where possible to reduce XSS vectors.
+
+## Enhanced Error Logging & Exception Handling
+- Adopt structured logging practices to capture detailed error contexts.
+- Catch and log renderer process errors with sufficient context to facilitate debugging.
+- Propagate errors to centralized logging when possible.
+- Avoid exposing sensitive data when logging errors.
 
 Adhering to these recommendations ensures your renderer remains performant, secure, and consistent with modern Electron development practices.

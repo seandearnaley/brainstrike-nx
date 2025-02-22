@@ -9,7 +9,7 @@ This file outlines how to safely structure inter-process communication (IPC) bet
 ## 1. IPC Architecture
 - **Channel Separation:**
   - Create distinct IPC channels for each domain (e.g., `dialog:open`, `fs:readDir`).
-  - Avoid using a single “catch-all” channel with massive switch statements.
+  - Avoid using a single "catch-all" channel with massive switch statements.
 - **Async vs. Sync:**
   - Prefer `ipcRenderer.invoke / ipcMain.handle` for async, promise-based communication.
   - Limit synchronous methods (`sendSync`) to rare cases, as they block the UI.
@@ -44,6 +44,12 @@ This file outlines how to safely structure inter-process communication (IPC) bet
   - In main tests, simulate `ipcMain.handle` calls with test stubs.
 - **Logging & DevTools:**
   - Add logs on both sides (main & renderer) for IPC calls in dev mode.
-  - Use Electron’s built-in devTools or external logging libraries to debug IPC flow.
+  - Use Electron's built-in devTools or external logging libraries to debug IPC flow.
+
+## Enhanced IPC Security & Safe Data Transfer
+- Enforce strict validation and sanitization for all IPC messages.
+- Ensure IPC channels are sandboxed to prevent unauthorized access and data leakage.
+- Implement context-aware logging for all IPC communications to aid in debugging and tracing.
+- Standardize naming conventions for IPC channels across the codebase for consistency.
 
 By following these IPC and preload guidelines, you maintain a clean separation of concerns, reduce security risks, and keep your Electron codebase organized.

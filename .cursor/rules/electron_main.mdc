@@ -4,7 +4,7 @@ globs:
 ---
 # Electron Main Process Guidelines
 
-These guidelines detail best practices for Electron’s main process, focusing on security, IPC structure, and performance considerations.
+These guidelines detail best practices for Electron's main process, focusing on security, IPC structure, and performance considerations.
 
 ## 1. App Lifecycle & Window Management
 - **Single Responsibility:**
@@ -47,5 +47,11 @@ These guidelines detail best practices for Electron’s main process, focusing o
 - **CSP & Safe Defaults:**
   - Use a safe Content Security Policy for any loaded HTML.
   - Block navigation to external sites or use `shell.openExternal` carefully.
+
+## Enhanced Error Logging & Exception Handling
+- Adopt structured logging practices to capture detailed context for each error.
+- Ensure errors in the main process are propagated with sufficient context to facilitate debugging.
+- Implement comprehensive exception filters to gracefully handle unexpected failures.
+- Avoid exposing sensitive data through error logs.
 
 Following these main process guidelines keeps the core of your Electron app secure, responsive, and cleanly structured.
